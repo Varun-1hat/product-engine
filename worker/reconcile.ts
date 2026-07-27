@@ -1,0 +1,168 @@
+/**
+ * worker/reconcile.ts — polls awaiting_provider jobs (HeyGen fallback,
+ * Veo, Higgsfield — spec §7 Stage 5/7, brief §10.19). Claims via
+ * jobs.claimAwaitingProvider (SKIP LOCKED), calls adapter.poll(), and on
+ * completion logs cost + persists the asset_version. On failure, marks the
+ * job failed and logs a (conservatively unbilled) cost_log row.
+ *
+ * Cost-logging note (see src/adapters/video_broll/veo.ts and
+ * src/adapters/video_avatar/heygen.ts header notes): poll()'s given
+ * signature (provider_job_id, provider_key) carries no aspect_ratio/
+ * resolution/units/variant, so it returns best-effort metadata. This is
+ * the authoritative reconciliation point — it overwrites poll()'s
+ * placeholders with what src/stages/clip and src/stages/outro recorded in
+ * `jobs.payload` at request time (the real values, known from the full
+ * GenerateInput at that point).
+ */
+import type { ServiceClient } from "@/src/lib/supabase/service";
+import type { StorageClient } from "@/src/lib/storage";
+import type { CostEngine } from "@/src/lib/cost/engine";
+import type { JobQueue, Job } from "@/src/lib/jobs/queue";
+import type { AdapterRegistry } from "@/src/adapters/registry";
+import type { KeyResolver } from "@/src/lib/crypto/vault";
+import { getAsset, upsertAssetVersion } from "@/src/lib/versioning";
+import type { Category, Provider, StageId } from "@/src/lib/db/enums";
+
+interface AsyncGenJobPayload {
+  call_type?: "generate" | "redo";
+  provider?: string;
+  variant?: string | null;
+  units?: number;
+  unit_type?: string;
+  aspect_ratio?: string;
+  resolution?: string;
+  duration_s?: number | null;
+  route?: "model" | "crossfade";
+}
+
+function categoryForJob(job: Job, payload: AsyncGenJobPayload): Category | null {
+  if (job.type === "broll_gen") return "video_broll";
+  if (job.type === "avatar_gen") return "video_avatar";
+  if (job.type === "outro_gen") return payload.route === "model" ? "video_broll" : null;
+  return null;
+}
+
+function stageForJob(job: Job): StageId {
+  if (job.type === "outro_gen") return "outro";
+  return "clip";
+}
+
+export async function reconcileJob(deps: {
+  supa: ServiceClient;
+  costEngine: CostEngine;
+  jobs: JobQueue;
+  adapters: AdapterRegistry;
+  keys: KeyResolver;
+  job: Job;
+}): Promise<void> {
+  const { supa, costEngine, jobs, adapters, keys, job } = deps;
+  const payload = (job.payload ?? {}) as AsyncGenJobPayload;
+
+  const category = categoryForJob(job, payload);
+  if (!category || !job.provider || !job.provider_job_id || !job.reel_id) {
+    return; // not a pollable async-provider job (shouldn't normally happen for awaiting_provider rows)
+  }
+
+  const { data: reelRow, error: reelError } = await supa.from("reels").select("client_id").eq("id", job.reel_id).single();
+  if (reelError) throw new Error(`reels lookup failed: ${reelError.message}`);
+  const clientId = (reelRow as { client_id: string }).client_id;
+
+  const adapter = adapters.get(category, job.provider);
+  const callType = payload.call_type ?? "generate";
+
+  try {
+    const providerKey = await keys.forProvider(clientId, job.provider as Provider);
+    const result = await adapter.poll!(job.provider_job_id, providerKey);
+
+    if (result.status === "pending") return; // still running — left as awaiting_provider for the next tick
+
+    if (!job.asset_id) throw new Error(`job ${job.id} succeeded but has no asset_id to attach the result to`);
+
+    const asset = await getAsset(supa, job.asset_id);
+    const metadata = {
+      ...(result.asset?.metadata ?? {}),
+      aspect: payload.aspect_ratio ?? result.asset?.metadata.aspect,
+      resolution: payload.resolution ?? result.asset?.metadata.resolution,
+      duration_s: payload.duration_s ?? result.asset?.metadata.duration_s,
+      mime: result.asset?.mime,
+    };
+
+    const costLog = await costEngine.log({
+      reel_id: job.reel_id,
+      client_id: clientId,
+      scene_id: job.scene_id ?? undefined,
+      stage: stageForJob(job),
+      provider: job.provider as Provider,
+      adapter: adapter.id,
+      call_type: callType,
+      call_status: "success",
+      units: payload.units ?? result.units,
+      unit_type: payload.unit_type ?? result.unit_type,
+      variant: payload.variant ?? result.variant ?? undefined,
+      provider_asset_id: job.provider_job_id,
+      idempotency_key: job.idempotency_key ?? undefined,
+    });
+
+    const { version } = await upsertAssetVersion(supa, {
+      assetId: job.asset_id,
+      reel_id: job.reel_id,
+      scene_id: job.scene_id,
+      slot: asset.slot,
+      media_type: "video",
+      shared: asset.shared,
+      storage_path: result.asset?.storage_path ?? null,
+      source: "generated",
+      provider: job.provider as Provider,
+      metadata,
+      units: payload.units ?? result.units,
+      unit_type: payload.unit_type ?? result.unit_type,
+      cost_log_id: costLog.id,
+    });
+
+    await jobs.complete(job.id, { asset_version_id: version.id });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Conservative default: unbilled unless we have positive confirmation
+    // of a billed attempt — none of the wave-1/2 adapters currently signal
+    // that distinctly (spec §4/§9 edge #13; a future enhancement could have
+    // adapters throw a typed error carrying `billed: true`).
+    await costEngine.log({
+      reel_id: job.reel_id,
+      client_id: clientId,
+      scene_id: job.scene_id ?? undefined,
+      stage: stageForJob(job),
+      provider: job.provider as Provider,
+      adapter: adapter.id,
+      call_type: callType,
+      call_status: "failed_unbilled",
+      idempotency_key: job.idempotency_key ?? undefined,
+    });
+    await jobs.fail(job.id, message);
+  }
+}
+
+export async function runReconcileTick(deps: {
+  supa: ServiceClient;
+  storage: StorageClient;
+  costEngine: CostEngine;
+  jobs: JobQueue;
+  adapters: AdapterRegistry;
+  keys: KeyResolver;
+  workerId: string;
+  limit?: number;
+}): Promise<number> {
+  const claimed = await deps.jobs.claimAwaitingProvider(deps.workerId, deps.limit ?? 10);
+  await Promise.all(
+    claimed.map((job) =>
+      reconcileJob({
+        supa: deps.supa,
+        costEngine: deps.costEngine,
+        jobs: deps.jobs,
+        adapters: deps.adapters,
+        keys: deps.keys,
+        job,
+      })
+    )
+  );
+  return claimed.length;
+}
