@@ -1,7 +1,13 @@
 /**
  * Claude client for the runtime skills (brief §9). Agency-level
- * ANTHROPIC_API_KEY; calls here are agency overhead and are NEVER written
- * to cost_log (Assumption 8 — brief §7 bills only media providers).
+ * ANTHROPIC_API_KEY.
+ *
+ * These calls ARE billed and ARE written to cost_log (this retires the
+ * original Assumption 8, "agency overhead, never logged"): every call
+ * reports its token usage through `onUsage`, and src/lib/context.ts turns
+ * that into cost_log rows so a reel's spend covers prompt generation and
+ * orchestration, not just the media providers.
+ *
  * Server/worker-only by code-organization convention (see
  * src/lib/supabase/service.ts for why `server-only` is not used here —
  * this module must also run under Vitest and the tsx-run worker).
@@ -19,6 +25,15 @@ function getClient(): Anthropic {
   return client;
 }
 
+export interface LlmUsage {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/** Receives one report per billed API call — including retried attempts, which cost real tokens. */
+export type LlmUsageSink = (usage: LlmUsage) => void | Promise<void>;
+
 export interface CallLlmJsonOptions<T> {
   system: string;
   prompt: string;
@@ -26,6 +41,7 @@ export interface CallLlmJsonOptions<T> {
   maxRetries?: number;
   model?: string;
   maxTokens?: number;
+  onUsage?: LlmUsageSink;
 }
 
 function isTextBlock(block: unknown): block is { type: "text"; text: string } {
@@ -67,6 +83,21 @@ export async function callLlmJson<T>(opts: CallLlmJsonOptions<T>): Promise<T> {
         system: `${opts.system}\n\nRespond with ONLY a single JSON object — no prose, no markdown code fences.`,
         messages: [{ role: "user", content: opts.prompt }],
       });
+
+      // Reported per attempt (a retry is a second billed call), and before
+      // parsing — the tokens are spent whether or not the JSON validates.
+      // Never let a bookkeeping failure fail the generation itself.
+      if (opts.onUsage) {
+        try {
+          await opts.onUsage({
+            model,
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+          });
+        } catch {
+          // ignore — cost logging must not break the pipeline
+        }
+      }
 
       const textParts: string[] = [];
       for (const block of response.content) {

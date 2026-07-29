@@ -23,7 +23,7 @@ import type { JobQueue } from "@/src/lib/jobs/queue";
 import type { StorageClient } from "@/src/lib/storage";
 import type { KeyResolver } from "@/src/lib/crypto/vault";
 import { createSecret } from "@/src/lib/crypto/vault";
-import { ASPECT_RATIOS, RESOLUTIONS, PROVIDERS } from "@/src/lib/db/enums";
+import { ASPECT_RATIOS, RESOLUTIONS, PROVIDERS, type Provider } from "@/src/lib/db/enums";
 import type { AvatarRow, Client, ClientConfigRow, ProductRow } from "@/src/lib/db/types";
 
 export interface ConfigStageContext {
@@ -67,15 +67,32 @@ export const configInputSchema = z.object({
 });
 export type ConfigInput = z.infer<typeof configInputSchema>;
 
+/** What a saved provider key looks like on the wire — masked, never the raw secret. */
+export interface MaskedProviderKey {
+  provider: Provider;
+  masked_key: string;
+  account_label: string | null;
+}
+
 export interface ConfigOutput {
   client: Client;
   client_config: ClientConfigRow;
   avatars: AvatarRow[];
   products: ProductRow[];
+  provider_keys: MaskedProviderKey[];
 }
 
-/** Google/Gemini key backs both nano_banana and veo — write both provider_keys rows (spec §2.2). */
-const GOOGLE_BACKED_PROVIDERS = ["nano_banana", "veo"] as const;
+/** Google/Gemini key backs nano_banana, veo and lyria — write all their provider_keys rows (spec §2.2). */
+const GOOGLE_BACKED_PROVIDERS = ["nano_banana", "veo", "lyria"] as const;
+
+/**
+ * Provider keys are never returned in full — only the last 5 characters,
+ * which is enough to tell one client's key from another's when reconciling
+ * provider invoices, without the response ever carrying a usable secret.
+ */
+export function maskKey(key: string): string {
+  return key.length <= 5 ? "*".repeat(key.length) : `****${key.slice(-5)}`;
+}
 
 async function upsertClientConfig(
   supa: ServiceClient,
@@ -229,17 +246,33 @@ export async function loadConfig(ctx: ConfigStageContext): Promise<ConfigOutput 
   if (error) throw new Error(`clients lookup failed: ${error.message}`);
   if (!client) return null;
 
-  const [{ data: clientConfig }, { data: avatars }, { data: products }] = await Promise.all([
+  const [{ data: clientConfig }, { data: avatars }, { data: products }, { data: keyRows }] = await Promise.all([
     ctx.supa.from("client_config").select("*").eq("client_id", ctx.clientId).maybeSingle(),
     ctx.supa.from("avatars").select("*").eq("client_id", ctx.clientId).order("created_at", { ascending: true }),
     ctx.supa.from("products").select("*").eq("client_id", ctx.clientId).order("created_at", { ascending: true }),
+    ctx.supa.from("provider_keys").select("provider, vault_secret_id, account_label").eq("client_id", ctx.clientId),
   ]);
+
+  // Decrypt server-side only to build the masked form — the raw key never
+  // leaves this function (the google-backed rows share one secret, so the
+  // decrypts are cached by vault_secret_id).
+  const maskedBySecret = new Map<string, string>();
+  const provider_keys: MaskedProviderKey[] = [];
+  for (const row of (keyRows ?? []) as Array<{ provider: Provider; vault_secret_id: string; account_label: string | null }>) {
+    let masked = maskedBySecret.get(row.vault_secret_id);
+    if (masked === undefined) {
+      masked = maskKey(await ctx.keys.decrypt(row.vault_secret_id));
+      maskedBySecret.set(row.vault_secret_id, masked);
+    }
+    provider_keys.push({ provider: row.provider, masked_key: masked, account_label: row.account_label });
+  }
 
   return {
     client: client as Client,
     client_config: (clientConfig as ClientConfigRow) ?? { client_id: ctx.clientId } as ClientConfigRow,
     avatars: (avatars ?? []) as AvatarRow[],
     products: (products ?? []) as ProductRow[],
+    provider_keys,
   };
 }
 

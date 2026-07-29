@@ -36,6 +36,11 @@ const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? 5000);
 const RECONCILE_INTERVAL_MS = Number(process.env.WORKER_RECONCILE_INTERVAL_MS ?? 15000);
 const CLAIM_BATCH_SIZE = 5;
 
+// N3: re-entrancy guard for the reconcile interval below — without it, a
+// tick that runs longer than RECONCILE_INTERVAL_MS overlaps with the next
+// one instead of skipping it.
+let reconcileInFlight = false;
+
 interface WorkerDeps {
   supa: ServiceClient;
   storage: StorageClient;
@@ -123,7 +128,9 @@ async function dispatchJob(deps: WorkerDeps, job: Job): Promise<void> {
 }
 
 async function claimLoopTick(deps: WorkerDeps): Promise<number> {
+  console.log("[worker] polling for jobs...");
   const claimed = await deps.jobs.claim(WORKER_ID, undefined, CLAIM_BATCH_SIZE);
+  console.log(`[worker] claimed ${claimed.length} jobs`);
   await Promise.all(
     claimed.map(async (job) => {
       try {
@@ -155,9 +162,13 @@ async function main(): Promise<void> {
   }, POLL_INTERVAL_MS);
 
   const reconcileTimer = setInterval(() => {
-    runReconcileTick({ ...deps, workerId: WORKER_ID }).catch((err) =>
-      console.error("[worker] reconcile tick failed:", err)
-    );
+    if (reconcileInFlight) return;
+    reconcileInFlight = true;
+    runReconcileTick({ ...deps, workerId: WORKER_ID })
+      .catch((err) => console.error("[worker] reconcile tick failed:", err))
+      .finally(() => {
+        reconcileInFlight = false;
+      });
   }, RECONCILE_INTERVAL_MS);
 
   const shutdown = () => {

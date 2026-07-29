@@ -14,10 +14,17 @@ import path from "node:path";
 // src/testUtils/fakeSupabase.ts + app/api/webhooks/heygen/route.test.ts).
 // React components under app/components/** are NOT covered here — they'd
 // need jsdom + a component-testing library, neither of which is installed.
+//
+// middleware.test.ts is listed explicitly (added by the V2 Phase 0 Tester
+// pass): middleware.ts lives at the repo root (same level as
+// next.config.ts, required by Next's convention), outside src/**, worker/**
+// and app/**, so none of the globs above would otherwise pick it up. It's a
+// plain (NextRequest) => NextResponse function with @supabase/ssr mocked at
+// the module boundary — same node environment, no DOM needed.
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts", "worker/**/*.test.ts", "app/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "worker/**/*.test.ts", "app/**/*.test.ts", "middleware.test.ts"],
     exclude: ["node_modules", ".next", "dist"],
     restoreMocks: true,
   },

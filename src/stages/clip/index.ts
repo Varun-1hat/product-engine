@@ -39,10 +39,12 @@ import {
   revertPromptVersion,
   upsertPromptVersion,
 } from "@/src/lib/versioning";
+import { createUploadedAsset, uploadAssetVersion } from "@/src/lib/assetUpload";
 import { heygenCallbackUrl } from "@/src/adapters/config";
 import { composeVeoVariant } from "@/src/adapters/video_broll/veo";
 import type { AssetRow, AvatarRow, PromptRow, ReelConfigRow, SceneRow } from "@/src/lib/db/types";
 import type { AssetRef, GenerateInput } from "@/src/adapters/types";
+import { toPublicJob } from "@/src/lib/jobs/queue";
 import type { Job } from "@/src/lib/jobs/queue";
 import type { PromptKind, Provider } from "@/src/lib/db/enums";
 import type { BrandContext } from "@/src/skills/types";
@@ -107,6 +109,20 @@ async function ensureMotionPrompt(
   return { promptId: prompt.id, promptVersionId: version.id, text: version.text };
 }
 
+/**
+ * Creates (never overwrites) the motion/shot prompt for every scene without
+ * generating anything — so the prompt is editable BEFORE the expensive clip
+ * call, instead of only on a paid redo. generateClipForScene() reuses
+ * whatever is here via the same ensureMotionPrompt().
+ */
+export async function ensureClipPrompts(ctx: StageContext): Promise<void> {
+  const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
+  const brand = await getBrandContext(ctx.supa, ctx.clientId);
+  for (const scene of scenes) {
+    await ensureMotionPrompt(ctx, scene, scene.type === "broll" ? "broll_motion" : "avatar_shot", brand);
+  }
+}
+
 async function enqueueClip(
   ctx: StageContext,
   scene: SceneRow,
@@ -114,7 +130,8 @@ async function enqueueClip(
   jobType: "broll_gen" | "avatar_gen",
   generateInput: GenerateInput,
   callbackToken: string | null,
-  callType: "generate" | "redo"
+  callType: "generate" | "redo",
+  promptId: string
 ): Promise<ClipGenerationOutcome> {
   const category = jobType === "broll_gen" ? "video_broll" : "video_avatar";
   const adapter = ctx.adapters.get(category, provider);
@@ -142,6 +159,13 @@ async function enqueueClip(
     const { error: sceneError } = await ctx.supa.from("scenes").update({ clip_asset_id: assetId }).eq("id", scene.id);
     if (sceneError) throw new Error(`scenes update (clip_asset_id) failed: ${sceneError.message}`);
   }
+
+  // Link the prompt to the asset it's producing — without this, buildSlotDetail's
+  // asset_id lookup (app/api/reels/[reelId]/clip/route.ts) never finds it, and the
+  // motion/shot prompt never becomes editable in the UI (unlike src/stages/image,
+  // which does this same link).
+  const { error: promptLinkError } = await ctx.supa.from("prompts").update({ asset_id: assetId }).eq("id", promptId);
+  if (promptLinkError) throw new Error(`prompts update (asset_id) failed: ${promptLinkError.message}`);
 
   const job = await ctx.jobs.enqueue({
     reel_id: ctx.reelId,
@@ -197,8 +221,8 @@ async function generateClipForScene(
     }
 
     const adapter = ctx.adapters.get("video_broll", model);
-    const caps = adapter.capabilities();
-    const { text } = await ensureMotionPrompt(ctx, scene, "broll_motion", brand);
+    const caps = adapter.capabilities(reelConfig.veo_variant);
+    const { promptId, text } = await ensureMotionPrompt(ctx, scene, "broll_motion", brand);
 
     const startImage = await buildAssetRefFromAssetId(ctx.supa, ctx.storage, scene.start_image_id);
     const endImage =
@@ -217,12 +241,18 @@ async function generateClipForScene(
       aspect_ratio: reelConfig.aspect_ratio,
       resolution: reelConfig.resolution,
       duration_s: scene.seconds,
-      variant: reelConfig.veo_variant,
+      // N6: veo_variant is a Veo-only concept ('standard'|'fast') — only
+      // stamp it for this scene/job when veo is the effective provider,
+      // matching how estimate() below already gates the same value.
+      // Leaving it unset for e.g. higgsfield keeps enqueueClip's
+      // payload.variant (the billing context) from falling back to this
+      // Veo variant, per that function's own comment.
+      variant: model === "veo" ? reelConfig.veo_variant : undefined,
       provider_key: providerKey,
       idempotency_key: randomUUID(),
     };
 
-    return enqueueClip(ctx, scene, model, "broll_gen", generateInput, null, callType);
+    return enqueueClip(ctx, scene, model, "broll_gen", generateInput, null, callType, promptId);
   }
 
   // avatar (silent) — spec §7 Stage 5, §14.3
@@ -238,7 +268,7 @@ async function generateClipForScene(
   if (avatarError) throw new Error(`avatars lookup failed: ${avatarError.message}`);
   const avatar = avatarData as AvatarRow;
 
-  const { text } = await ensureMotionPrompt(ctx, scene, "avatar_shot", brand);
+  const { promptId, text } = await ensureMotionPrompt(ctx, scene, "avatar_shot", brand);
 
   let references: AssetRef[] = [];
   if (scene.product_in_scene) {
@@ -266,31 +296,39 @@ async function generateClipForScene(
     callback_url: heygenCallbackUrl(callbackToken),
   };
 
-  return enqueueClip(ctx, scene, "heygen", "avatar_gen", generateInput, callbackToken, callType);
+  return enqueueClip(ctx, scene, "heygen", "avatar_gen", generateInput, callbackToken, callType, promptId);
 }
+
+/** Google (Veo) rate-limits concurrent generate calls — dispatch in small batches instead of all at once. */
+const CLIP_GENERATE_CONCURRENCY = 1;
 
 async function process(input: ClipInput, ctx: StageContext): Promise<ClipOutput> {
   const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
   const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
   const targetScenes = input.scene_ids ? scenes.filter((s) => input.scene_ids!.includes(s.id)) : scenes;
 
-  const results = await Promise.all(
-    targetScenes.map(async (scene): Promise<ClipSceneResult> => {
-      try {
-        if (scene.clip_asset_id) {
-          const asset = await getAsset(ctx.supa, scene.clip_asset_id);
-          if (asset.current_version_id) {
-            return { scene_id: scene.id, status: "already_generated", asset_id: asset.id };
+  const results: ClipSceneResult[] = [];
+  for (let i = 0; i < targetScenes.length; i += CLIP_GENERATE_CONCURRENCY) {
+    const batch = targetScenes.slice(i, i + CLIP_GENERATE_CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map(async (scene): Promise<ClipSceneResult> => {
+        try {
+          if (scene.clip_asset_id) {
+            const asset = await getAsset(ctx.supa, scene.clip_asset_id);
+            if (asset.current_version_id) {
+              return { scene_id: scene.id, status: "already_generated", asset_id: asset.id };
+            }
           }
+          const outcome = await generateClipForScene(ctx, reelConfig, scene);
+          const { job: _job, ...rest } = outcome;
+          return rest;
+        } catch (err) {
+          return { scene_id: scene.id, status: "blocked", reason: err instanceof Error ? err.message : String(err) };
         }
-        const outcome = await generateClipForScene(ctx, reelConfig, scene);
-        const { job: _job, ...rest } = outcome;
-        return rest;
-      } catch (err) {
-        return { scene_id: scene.id, status: "blocked", reason: err instanceof Error ? err.message : String(err) };
-      }
-    })
-  );
+      })
+    );
+    results.push(...batchResults);
+  }
 
   return { scenes: results };
 }
@@ -408,7 +446,29 @@ export function createClipReviewHooks(ctx: StageContext): ReviewHooks {
       const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
       const outcome = await generateClipForScene(ctx, reelConfig, scene, "redo");
       if (outcome.status === "blocked") throw new Error(outcome.reason ?? "redo blocked");
-      return { job: outcome.job };
+      // Never pass through the raw job row (callback_token/payload) to a
+      // route handler that JSON's this return value verbatim (BLOCK-2).
+      return { job: outcome.job ? toPublicJob(outcome.job) : undefined };
+    },
+
+    async uploadAsset(assetId, storagePath) {
+      return uploadAssetVersion(ctx, assetId, storagePath);
+    },
+
+    async uploadNewAsset({ sceneId }, storagePath) {
+      if (!sceneId) throw new Error("sceneId is required to upload a clip for a new slot");
+      const scene = await getScene(ctx.supa, sceneId);
+      const { asset, version } = await createUploadedAsset(ctx, {
+        slot: scene.type === "broll" ? "broll_clip" : "avatar_clip",
+        mediaType: "video",
+        storagePath,
+        sceneId,
+      });
+      // Point the scene at it, so process() reports "already_generated" and
+      // never generates over the upload.
+      const { error } = await ctx.supa.from("scenes").update({ clip_asset_id: asset.id }).eq("id", sceneId);
+      if (error) throw new Error(`scenes update (clip_asset_id) failed: ${error.message}`);
+      return version;
     },
 
     async revertPrompt(promptId, versionNo) {

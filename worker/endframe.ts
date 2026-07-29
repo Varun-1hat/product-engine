@@ -21,6 +21,7 @@ import type { StorageClient } from "@/src/lib/storage";
 import { dimensionsFor } from "@/src/adapters/dimensions";
 import { getAsset, upsertAssetVersion } from "@/src/lib/versioning";
 import type { Job } from "@/src/lib/jobs/queue";
+import { fileURLToPath } from "node:url";
 
 export interface EndframeRenderPayload {
   tagline: string | null;
@@ -32,6 +33,9 @@ interface BrandColors {
   accent?: string;
 }
 
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const DEFAULT_FONT_PATH = path.join(__dirname, "assets", "fonts", "NotoSans-Regular.ttf");
 let cachedFontData: Buffer | null = null;
 

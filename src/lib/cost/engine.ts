@@ -102,15 +102,23 @@ function isUniqueViolation(error: { code?: string }): boolean {
   return error.code === "23505";
 }
 
+/** rateCache entries older than this are re-fetched instead of served stale (minor — .pipeline/review.md). */
+const RATE_CACHE_TTL_MS = 5 * 60_000;
+
+interface RateCacheEntry {
+  rows: RateCardRow[];
+  fetchedAt: number;
+}
+
 export function createCostEngine(supa: ServiceClient): CostEngine {
-  const rateCache = new Map<string, RateCardRow[]>();
+  const rateCache = new Map<string, RateCacheEntry>();
 
   async function ratesFor(provider: string, unit_type: string): Promise<RateCardRow[]> {
     const key = `${provider}::${unit_type}`;
     const cached = rateCache.get(key);
-    if (cached) return cached;
+    if (cached && Date.now() - cached.fetchedAt < RATE_CACHE_TTL_MS) return cached.rows;
     const rows = await fetchRateCandidates(supa, provider, unit_type);
-    rateCache.set(key, rows);
+    rateCache.set(key, { rows, fetchedAt: Date.now() });
     return rows;
   }
 

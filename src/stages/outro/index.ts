@@ -19,15 +19,18 @@
  * payload.route) since either can involve ffmpeg work that shouldn't block
  * an HTTP request.
  */
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { StageContext, StageModule, StageState, ReviewHooks, CostEstimate } from "../types";
 import { nextStage } from "../types";
-import { resolveOutroRoute, type OutroRoute, type SupportsEndFrameLookup } from "@/src/lib/routing";
+import { resolveOutroRoute, supportsEndFrameLookupFor, type OutroRoute } from "@/src/lib/routing";
 import { getClientConfigRow, getReelConfig, getScenesForReel } from "@/src/lib/rows";
 import { getBrandContext } from "@/src/lib/brandContext";
 import { assetHistory, getAsset, promptHistory, revertAssetVersion, revertPromptVersion, upsertAssetVersion, upsertPromptVersion } from "@/src/lib/versioning";
+import { uploadAssetVersion } from "@/src/lib/assetUpload";
 import { composeVeoVariant } from "@/src/adapters/video_broll/veo";
 import type { AdapterRegistry } from "@/src/adapters/registry";
+import { toPublicJob } from "@/src/lib/jobs/queue";
 import type { Job } from "@/src/lib/jobs/queue";
 import type { Provider, StageId } from "@/src/lib/db/enums";
 import type { ReelConfigRow, SceneRow } from "@/src/lib/db/types";
@@ -46,10 +49,6 @@ export interface OutroOutput {
   outro_clip_asset_id: string;
   outro_clip_job: Job;
   route: OutroRoute;
-}
-
-function supportsEndFrameLookup(adapters: AdapterRegistry): SupportsEndFrameLookup {
-  return (provider) => adapters.tryGet("video_broll", provider)?.capabilities().supports_end_frame ?? false;
 }
 
 async function load(ctx: StageContext): Promise<StageState> {
@@ -77,6 +76,37 @@ async function enqueueEndFrameRender(ctx: StageContext, assetId: string, tagline
     type: "endframe_render",
     payload: { tagline },
   });
+}
+
+/**
+ * Creates (never overwrites) the outro motion prompt, without generating
+ * anything — so it's editable BEFORE the expensive outro-clip call, instead
+ * of only on a paid redo. enqueueOutroClip() reuses whatever is here.
+ */
+export async function ensureOutroPrompt(ctx: StageContext): Promise<{ promptId: string; versionId: string }> {
+  const { data, error } = await ctx.supa
+    .from("prompts")
+    .select("id, current_version_id")
+    .eq("reel_id", ctx.reelId)
+    .eq("kind", "outro_motion")
+    .maybeSingle();
+  if (error) throw new Error(`prompts lookup failed: ${error.message}`);
+  const existing = data as { id: string; current_version_id: string | null } | null;
+  if (existing?.current_version_id) return { promptId: existing.id, versionId: existing.current_version_id };
+
+  const brand = await getBrandContext(ctx.supa, ctx.clientId);
+  const text = await ctx.skills.brandStyleLock(
+    "Smooth, elegant motion transitioning the last shot into a clean branded end card.",
+    brand
+  );
+  const { prompt, version } = await upsertPromptVersion(ctx.supa, {
+    promptId: existing?.id,
+    reel_id: ctx.reelId,
+    kind: "outro_motion",
+    text,
+    source: "skill",
+  });
+  return { promptId: prompt.id, versionId: version.id };
 }
 
 async function ensureOutroClipAsset(ctx: StageContext): Promise<string> {
@@ -110,18 +140,9 @@ async function enqueueOutroClip(
 
   let promptVersionId: string | null = null;
   if (route.kind === "model") {
-    const brand = await getBrandContext(ctx.supa, ctx.clientId);
-    const text = await ctx.skills.brandStyleLock(
-      "Smooth, elegant motion transitioning the last shot into a clean branded end card.",
-      brand
-    );
-    const { version } = await upsertPromptVersion(ctx.supa, {
-      reel_id: ctx.reelId,
-      kind: "outro_motion",
-      text,
-      source: "skill",
-    });
-    promptVersionId = version.id;
+    // Reuses an already-prepared/edited prompt rather than re-running the
+    // skill over it, so a pre-generation edit actually reaches the provider.
+    promptVersionId = (await ensureOutroPrompt(ctx)).versionId;
   }
 
   const job = await ctx.jobs.enqueue({
@@ -130,6 +151,11 @@ async function enqueueOutroClip(
     asset_id: assetId,
     type: "outro_gen",
     provider: route.kind === "model" ? (route.provider as Provider) : null,
+    // N2: without this, worker/reconcile.ts's double-charge guard
+    // (cost_log's partial UNIQUE(reel_id, provider, idempotency_key)) is
+    // inert for outro-via-Veo generations — mirrors src/stages/clip/index.ts's
+    // b-roll enqueue (generateInput.idempotency_key).
+    idempotency_key: randomUUID(),
     payload: {
       call_type: callType,
       route: route.kind,
@@ -185,7 +211,7 @@ async function process(input: OutroInput, ctx: StageContext): Promise<OutroOutpu
       .eq("reel_id", ctx.reelId);
   }
 
-  const route = resolveOutroRoute(reelConfig, supportsEndFrameLookup(ctx.adapters));
+  const route = resolveOutroRoute(reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
   const { assetId: outroClipAssetId, job: outroClipJob } = await enqueueOutroClip(
     ctx,
     reelConfig,
@@ -205,7 +231,7 @@ async function process(input: OutroInput, ctx: StageContext): Promise<OutroOutpu
 
 async function estimate(_input: OutroInput, ctx: StageContext): Promise<CostEstimate> {
   const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
-  const route = resolveOutroRoute(reelConfig, supportsEndFrameLookup(ctx.adapters));
+  const route = resolveOutroRoute(reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
   if (route.kind === "crossfade") {
     return { total_usd: 0, rate_missing: false, lines: [] };
   }
@@ -296,14 +322,16 @@ export function createOutroReviewHooks(ctx: StageContext): ReviewHooks {
         const clientConfig = await getClientConfigRow(ctx.supa, ctx.clientId);
         const tagline = reelConfig.outro_tagline ?? clientConfig?.default_tagline ?? null;
         const job = await enqueueEndFrameRender(ctx, assetId, tagline);
-        return { job };
+        // Never pass through the raw job row (callback_token/payload) to a
+        // route handler that JSON's this return value verbatim (BLOCK-2).
+        return { job: toPublicJob(job) };
       }
 
       // outro_clip
       const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
       const lastScene = scenes[scenes.length - 1];
       if (!lastScene) throw new Error("reel has no scenes");
-      const route = resolveOutroRoute(reelConfig, supportsEndFrameLookup(ctx.adapters));
+      const route = resolveOutroRoute(reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
       const { job } = await enqueueOutroClip(
         ctx,
         reelConfig,
@@ -312,7 +340,16 @@ export function createOutroReviewHooks(ctx: StageContext): ReviewHooks {
         route,
         "redo"
       );
-      return { job };
+      return { job: toPublicJob(job) };
+    },
+
+    async uploadAsset(assetId, storagePath) {
+      return uploadAssetVersion(ctx, assetId, storagePath);
+    },
+
+    async uploadNewAsset(_target, storagePath) {
+      // The outro clip is a single per-reel slot — no locator needed.
+      return uploadAssetVersion(ctx, await ensureOutroClipAsset(ctx), storagePath);
     },
 
     async revertPrompt(promptId, versionNo) {

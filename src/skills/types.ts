@@ -5,6 +5,7 @@
  * (Assumption 8 — agency overhead).
  */
 import type { Boundary, SceneType } from "@/src/lib/db/enums";
+import type { LlmUsageSink } from "./llm";
 
 export interface BrandContext {
   brand_name?: string | null;
@@ -15,6 +16,10 @@ export interface BrandContext {
 
 export interface SceneBrainInput {
   topic: string;
+  /** Longer brief from Stage 2 — what content to keep and how to treat it. */
+  topic_description?: string | null;
+  /** Per-reel replacement for the built-in instruction (scene page). */
+  system_prompt?: string | null;
   total_seconds_target: number;
   avatar_enabled: boolean;
   has_products: boolean;
@@ -75,12 +80,22 @@ export interface SkillRegistry {
   briefJudge(input: BriefJudgeInput): Promise<BriefJudgeOutput>;
 }
 
-export async function createSkillRegistry(): Promise<SkillRegistry> {
+/**
+ * `onUsage`, when supplied, is bound to every skill in the registry — so a
+ * ctx-bound registry (src/lib/context.ts) writes each LLM call's tokens to
+ * cost_log without any call site having to know about billing.
+ */
+export async function createSkillRegistry(onUsage?: LlmUsageSink): Promise<SkillRegistry> {
   const [{ sceneBrain }, { imagePrompt }, { brandStyleLock }, { briefJudge }] = await Promise.all([
     import("./scene-brain"),
     import("./image-prompt"),
     import("./brand-style-lock"),
     import("./brief-judge"),
   ]);
-  return { sceneBrain, imagePrompt, brandStyleLock, briefJudge };
+  return {
+    sceneBrain: (input) => sceneBrain(input, onUsage),
+    imagePrompt: (input) => imagePrompt(input, onUsage),
+    brandStyleLock: (prompt, brand, refs) => brandStyleLock(prompt, brand, refs, onUsage),
+    briefJudge: (input) => briefJudge(input, onUsage),
+  };
 }

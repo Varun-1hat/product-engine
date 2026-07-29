@@ -93,6 +93,76 @@ describe("createHeygenAdapter", () => {
     expect(result.violations.join(" ")).toMatch(/reference images/);
   });
 
+  // V2 Phase 0 item 9 (.pipeline/spec.md): HeyGen's actual API enforces a
+  // COMBINED "video-like" slot budget — avatar looks occupy the same budget
+  // as reference videos. Before this fix, avatar_ids.length and videoRefCount
+  // were only ever checked independently, so e.g. 2 avatars + 2 reference
+  // videos (4 total "video-like" slots > max_reference_videos=3) was
+  // incorrectly allowed. worker/**-adjacent, flagged explicitly in
+  // .pipeline/changes.md as needing new test coverage since neither of the
+  // two tests above exercises avatar_ids and video references together.
+  describe("validate() — combined avatar + reference-video budget (max_reference_videos=3)", () => {
+    const videoRefs = (n: number) => Array.from({ length: n }, () => ({ base64: "x", mime_type: "video/mp4" }));
+
+    it("rejects 2 avatars + 2 reference videos (sum=4 > 3) even though each is within its own standalone limit", () => {
+      const adapter = createHeygenAdapter({ storage: fakeStorage() });
+      const result = adapter.validate({
+        prompt: "x",
+        avatar_ids: ["a", "b"], // within [min_avatar_ids=1, max_avatar_ids=3] alone
+        aspect_ratio: "9:16",
+        resolution: "1080p",
+        duration_s: 8,
+        references: videoRefs(2), // within max_reference_videos=3 alone
+      });
+      expect(result.ok).toBe(false);
+      expect(result.violations.join(" ")).toMatch(/combined video-slot budget/);
+      expect(result.violations.join(" ")).toMatch(/2 \+ 2 = 4/);
+    });
+
+    it("still separately reports the standalone avatar_ids[1,3] violation when both checks fail at once (3 avatars + 3 videos = 6 > 3)", () => {
+      const adapter = createHeygenAdapter({ storage: fakeStorage() });
+      const result = adapter.validate({
+        prompt: "x",
+        avatar_ids: ["a", "b", "c"], // within [1,3] alone — no standalone avatar_ids violation
+        aspect_ratio: "9:16",
+        resolution: "1080p",
+        duration_s: 8,
+        references: videoRefs(3), // within max_reference_videos=3 alone
+      });
+      expect(result.ok).toBe(false);
+      // Exactly the new combined-budget violation — the standalone checks
+      // (avatar_ids length, videoRefCount alone) both individually pass.
+      expect(result.violations).toHaveLength(1);
+      expect(result.violations[0]).toMatch(/combined video-slot budget/);
+    });
+
+    it("allows 1 avatar + 2 reference videos (sum=3, exactly at the combined budget, not exceeding it)", () => {
+      const adapter = createHeygenAdapter({ storage: fakeStorage() });
+      const result = adapter.validate({
+        prompt: "x",
+        avatar_ids: ["a"],
+        aspect_ratio: "9:16",
+        resolution: "1080p",
+        duration_s: 8,
+        references: videoRefs(2),
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it("the pre-existing standalone avatar_ids[1,3] check still fires independently of the combined budget (4 avatars, 0 references)", () => {
+      const adapter = createHeygenAdapter({ storage: fakeStorage() });
+      const result = adapter.validate({
+        prompt: "x",
+        avatar_ids: ["a", "b", "c", "d"],
+        aspect_ratio: "9:16",
+        resolution: "1080p",
+        duration_s: 8,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.violations.join(" ")).toMatch(/avatar_ids length 4 must be within \[1, 3\]/);
+    });
+  });
+
   it("validate() enforces the 4-15s duration range", () => {
     const adapter = createHeygenAdapter({ storage: fakeStorage() });
     expect(

@@ -5,7 +5,7 @@
  * corresponding src/skills/model-prompt/* skill.
  */
 import { z } from "zod";
-import { callLlmJson } from "./llm";
+import { callLlmJson, type LlmUsageSink } from "./llm";
 import type { ImagePromptInput, ImagePromptOutput } from "./types";
 
 const outputSchema = z.object({
@@ -22,7 +22,7 @@ const SYSTEM_PROMPT = [
   "When boundary_context is provided, keep continuity with the neighboring shot (matching setting/lighting/subject) so a shared or adjacent frame reads as one continuous motion.",
 ].join("\n");
 
-export async function imagePrompt(input: ImagePromptInput): Promise<ImagePromptOutput> {
+export async function imagePrompt(input: ImagePromptInput, onUsage?: LlmUsageSink): Promise<ImagePromptOutput> {
   const userPrompt = JSON.stringify({
     scene: input.scene,
     boundary_context: input.boundary_context ?? null,
@@ -34,6 +34,7 @@ export async function imagePrompt(input: ImagePromptInput): Promise<ImagePromptO
     system: SYSTEM_PROMPT,
     prompt: `Write the image prompt for this slot:\n${userPrompt}\n\nRespond as JSON: { "prompt": string, "reference_paths": string[] }`,
     schema: outputSchema,
+    onUsage,
   });
 
   return {

@@ -11,6 +11,18 @@
  * "job.payload -> cost_log/asset_versions.metadata" handoff the Coder
  * explicitly flagged as the least spec-literal, highest-risk part of the
  * adapter contract.
+ *
+ * Test-maintenance note (V2 Phase 0, BLOCK-2 SSRF allowlist): the
+ * avatar_video.success fixtures below used to point `video_url` at
+ * `https://cdn.heygen.example/...`. `.example` is a reserved, deliberately
+ * fake TLD — once route.ts started validating the download host against
+ * ALLOWED_HEYGEN_HOSTS (`/(^|\.)heygen\.com$/i`, `/(^|\.)amazonaws\.com$/i`,
+ * https-only), that fixture correctly started failing the allowlist and the
+ * route 400'd instead of downloading. That's the security fix working, not a
+ * regression — updated below to `https://cdn.heygen.com/...`, an actual
+ * allowlisted host, so these tests exercise the success path again. The new
+ * "SSRF host allowlist" describe block below covers the rejection path that
+ * these two tests used to (accidentally) exercise.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeSupabase, type FakeRow, type FakeSupabaseClient } from "@/src/testUtils/fakeSupabase";
@@ -205,12 +217,12 @@ describe("POST /api/webhooks/heygen — avatar_video.success", () => {
     const res = await postWebhook("tok-success", {
       event: "avatar_video.success",
       video_id: "vid_success_1",
-      video_url: "https://cdn.heygen.example/vid_success_1.mp4",
+      video_url: "https://cdn.heygen.com/vid_success_1.mp4",
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
 
-    expect(fetchMock).toHaveBeenCalledWith("https://cdn.heygen.example/vid_success_1.mp4");
+    expect(fetchMock).toHaveBeenCalledWith("https://cdn.heygen.com/vid_success_1.mp4");
 
     const expectedPath = buildPollResultPath({ provider: "heygen", provider_job_id: "vid_success_1", ext: "mp4" });
     expect(supa._uploads).toHaveLength(1);
@@ -277,12 +289,130 @@ describe("POST /api/webhooks/heygen — avatar_video.success", () => {
       }),
     ]);
 
-    const body = { event: "avatar_video.success", video_id: "vid_retry", video_url: "https://cdn.heygen.example/vid_retry.mp4" };
+    const body = { event: "avatar_video.success", video_id: "vid_retry", video_url: "https://cdn.heygen.com/vid_retry.mp4" };
     const first = await postWebhook("tok-retry", body);
     const second = await postWebhook("tok-retry", body);
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
     expect(supa._tables.cost_log.filter((r) => r.idempotency_key === "idem-retry-1")).toHaveLength(1);
+  });
+});
+
+describe("POST /api/webhooks/heygen — SSRF host allowlist (BLOCK-2, isAllowedDownloadUrl)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("refuses to download from a host outside heygen.com/amazonaws.com, fails the job, and touches neither fetch nor cost_log/storage", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(videoDownloadResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const supa = seedSupa([
+      baseJob({
+        id: "job-ssrf",
+        callback_token: "tok-ssrf",
+        provider_job_id: "vid_ssrf",
+        attempts: 3,
+        max_attempts: 3, // exhausted -> jobs.fail()'s default retry logic marks it terminally "failed"
+        payload: { call_type: "generate", units: 1, unit_type: "video" },
+      }),
+    ]);
+
+    const res = await postWebhook("tok-ssrf", {
+      event: "avatar_video.success",
+      video_id: "vid_ssrf",
+      video_url: "https://evil-actor.example/steal.mp4",
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/refusing to download from disallowed host evil-actor\.example/);
+
+    // The disallowed host must never be fetched — that's the entire point of
+    // validating before the fetch(parsed.asset.url) call.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(supa._uploads).toHaveLength(0);
+    expect(supa._tables.cost_log).toHaveLength(0);
+
+    const jobRow = supa._tables.jobs.find((j) => j.id === "job-ssrf");
+    expect(jobRow?.status).toBe("failed");
+    expect(jobRow?.error).toMatch(/refusing to download from disallowed host/);
+  });
+
+  it("rejects a domain-spoofing attempt where the disallowed host merely CONTAINS 'heygen.com' as a substring (regex must anchor on the suffix, not use .includes())", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(videoDownloadResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedSupa([
+      baseJob({
+        id: "job-spoof",
+        callback_token: "tok-spoof",
+        provider_job_id: "vid_spoof",
+        payload: { call_type: "generate", units: 1, unit_type: "video" },
+      }),
+    ]);
+
+    const res = await postWebhook("tok-spoof", {
+      event: "avatar_video.success",
+      video_id: "vid_spoof",
+      // "heygen.com" appears as a substring, but the real (right-most) host
+      // is attacker-controlled-cdn.com — the hostname does NOT end in
+      // ".heygen.com" or "heygen.com" exactly, so it must still be rejected.
+      video_url: "https://heygen.com.attacker-controlled-cdn.com/steal.mp4",
+    });
+
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a plain-http URL to an otherwise-allowlisted host (https-only)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(videoDownloadResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedSupa([
+      baseJob({
+        id: "job-http",
+        callback_token: "tok-http",
+        provider_job_id: "vid_http",
+        payload: { call_type: "generate", units: 1, unit_type: "video" },
+      }),
+    ]);
+
+    const res = await postWebhook("tok-http", {
+      event: "avatar_video.success",
+      video_id: "vid_http",
+      video_url: "http://cdn.heygen.com/vid_http.mp4",
+    });
+
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("allows an S3-shaped amazonaws.com host (the defensive second allowlist entry) and completes normally", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(videoDownloadResponse());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const supa = seedSupa([
+      baseJob({
+        id: "job-s3",
+        callback_token: "tok-s3",
+        provider_job_id: "vid_s3",
+        idempotency_key: "idem-s3-1",
+        payload: { call_type: "generate", units: 1, unit_type: "video", aspect_ratio: "9:16", resolution: "1080p" },
+      }),
+    ]);
+
+    const res = await postWebhook("tok-s3", {
+      event: "avatar_video.success",
+      video_id: "vid_s3",
+      video_url: "https://heygen-videos.s3.amazonaws.com/vid_s3.mp4",
+    });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledWith("https://heygen-videos.s3.amazonaws.com/vid_s3.mp4");
+    expect(supa._tables.cost_log).toHaveLength(1);
+    const jobRow = supa._tables.jobs.find((j) => j.id === "job-s3");
+    expect(jobRow?.status).toBe("succeeded");
   });
 });

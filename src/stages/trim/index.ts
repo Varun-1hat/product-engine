@@ -19,8 +19,9 @@
 import { z } from "zod";
 import type { StageContext, StageModule, StageState, ReviewHooks } from "../types";
 import { nextStage } from "../types";
+import { toPublicJob } from "@/src/lib/jobs/queue";
 import type { Job } from "@/src/lib/jobs/queue";
-import { effectiveBoundary, type SupportsEndFrameLookup } from "@/src/lib/routing";
+import { effectiveBoundary, supportsEndFrameLookupFor } from "@/src/lib/routing";
 import { getReelConfig, getScenesForReel } from "@/src/lib/rows";
 import { assetHistory, getAsset, revertAssetVersion } from "@/src/lib/versioning";
 import type { AdapterRegistry } from "@/src/adapters/registry";
@@ -37,10 +38,6 @@ export interface TrimOutput {
   job: Job;
 }
 
-function supportsEndFrameLookup(adapters: AdapterRegistry): SupportsEndFrameLookup {
-  return (provider) => adapters.tryGet("video_broll", provider)?.capabilities().supports_end_frame ?? false;
-}
-
 export interface TrimHint {
   scene_id: string;
   note: string;
@@ -50,7 +47,7 @@ export interface TrimHint {
 export async function computeTrimHints(ctx: StageContext): Promise<TrimHint[]> {
   const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
   const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
-  const supportsEndFrame = supportsEndFrameLookup(ctx.adapters);
+  const supportsEndFrame = supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant);
 
   const hints: TrimHint[] = [];
   for (let i = 0; i < scenes.length; i++) {
@@ -148,7 +145,9 @@ export function createTrimReviewHooks(ctx: StageContext): ReviewHooks {
         type: "trim",
         payload: { base_version_id: asset.current_version_id, start_s: trim.start_s, end_s: trim.end_s },
       });
-      return { job };
+      // Never pass through the raw job row (callback_token/payload) to a
+      // route handler that JSON's this return value verbatim (BLOCK-2).
+      return { job: toPublicJob(job) };
     },
     async revertPrompt() {
       throw new Error("trim has no prompts to revert");

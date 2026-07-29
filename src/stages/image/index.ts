@@ -21,8 +21,7 @@ import { z } from "zod";
 import type { StageContext, StageModule, StageState, ReviewHooks, CostEstimate } from "../types";
 import { nextStage } from "../types";
 import { planImageSlots, type DistinctImageSlot } from "./plan";
-import type { AdapterRegistry } from "@/src/adapters/registry";
-import type { SupportsEndFrameLookup } from "@/src/lib/routing";
+import { supportsEndFrameLookupFor } from "@/src/lib/routing";
 import { getReelConfig, getScene, getScenesForReel } from "@/src/lib/rows";
 import { getBrandContext, getProductsWithPhotos, guessMimeFromExt } from "@/src/lib/brandContext";
 import {
@@ -36,6 +35,7 @@ import {
   upsertAssetVersion,
   upsertPromptVersion,
 } from "@/src/lib/versioning";
+import { createUploadedAsset, uploadAssetVersion } from "@/src/lib/assetUpload";
 import type { AssetRow, AssetVersion, ReelConfigRow, SceneRow } from "@/src/lib/db/types";
 import type { PromptKind } from "@/src/lib/db/enums";
 
@@ -50,10 +50,6 @@ export interface ImageOutput {
   slots: ImageSlotResult[];
 }
 
-function supportsEndFrameLookup(adapters: AdapterRegistry): SupportsEndFrameLookup {
-  return (provider) => adapters.tryGet("video_broll", provider)?.capabilities().supports_end_frame ?? false;
-}
-
 function promptKindFor(role: "start" | "end"): PromptKind {
   return role === "start" ? "image_start" : "image_end";
 }
@@ -63,13 +59,39 @@ async function load(ctx: StageContext): Promise<StageState> {
   return { stage: "image", data: { scenes } };
 }
 
-/** Generates (or reuses) the image for one planned slot and returns its asset row. */
-async function generateSlotAsset(
+/**
+ * Creates (never overwrites) the prompt for one planned slot. Reusing an
+ * existing prompt is what makes it editable BEFORE the paid image call —
+ * ensureImagePrompts() below writes them ahead of time, and a user edit
+ * survives into the generate that follows.
+ */
+async function ensureSlotPrompt(
   ctx: StageContext,
-  reelConfig: ReelConfigRow,
   slotPlan: DistinctImageSlot,
   scene: SceneRow
-): Promise<AssetRow> {
+): Promise<{ promptId: string; versionId: string; text: string; reference_paths: string[] }> {
+  const kind = promptKindFor(slotPlan.role);
+  const { data, error } = await ctx.supa
+    .from("prompts")
+    .select("id, current_version_id")
+    .eq("scene_id", scene.id)
+    .eq("kind", kind)
+    .maybeSingle();
+  if (error) throw new Error(`prompts lookup failed: ${error.message}`);
+  const existing = data as { id: string; current_version_id: string | null } | null;
+
+  if (existing?.current_version_id) {
+    const current = await getCurrentPromptVersion(ctx.supa, existing.id);
+    if (current) {
+      return {
+        promptId: existing.id,
+        versionId: current.id,
+        text: current.text,
+        reference_paths: current.reference_paths ?? [],
+      };
+    }
+  }
+
   const brand = await getBrandContext(ctx.supa, ctx.clientId);
   const products = await getProductsWithPhotos(ctx.supa, ctx.clientId);
 
@@ -94,29 +116,101 @@ async function generateSlotAsset(
     products,
   });
 
-  const { prompt: promptRow, version: promptVersion } = await upsertPromptVersion(ctx.supa, {
+  const { prompt: promptRow, version } = await upsertPromptVersion(ctx.supa, {
+    promptId: existing?.id,
     reel_id: ctx.reelId,
     scene_id: scene.id,
-    kind: promptKindFor(slotPlan.role),
+    kind,
     text: prompt,
     reference_paths,
     source: "skill",
   });
 
-  const { asset } = await generateAndPersistImage(
-    ctx,
-    reelConfig,
-    slotPlan,
-    scene,
-    prompt,
-    reference_paths,
-    promptVersion.id
-  );
+  return { promptId: promptRow.id, versionId: version.id, text: version.text, reference_paths };
+}
+
+/** Writes the prompt for every planned slot without generating any image. */
+export async function ensureImagePrompts(ctx: StageContext): Promise<void> {
+  const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
+  const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
+  const plan = planImageSlots(scenes, reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
+  for (const slotPlan of plan) {
+    const scene = scenes.find((s) => s.id === slotPlan.primary_scene_id);
+    if (scene) await ensureSlotPrompt(ctx, slotPlan, scene);
+  }
+}
+
+/** Generates (or reuses) the image for one planned slot and returns its asset row. */
+async function generateSlotAsset(
+  ctx: StageContext,
+  reelConfig: ReelConfigRow,
+  slotPlan: DistinctImageSlot,
+  scene: SceneRow
+): Promise<AssetRow> {
+  const { promptId, versionId, text, reference_paths } = await ensureSlotPrompt(ctx, slotPlan, scene);
+
+  const { asset } = await generateAndPersistImage(ctx, reelConfig, slotPlan, scene, text, reference_paths, versionId);
 
   // Link the prompt to the asset it produced (lineage — prompts.asset_id).
-  await ctx.supa.from("prompts").update({ asset_id: asset.id }).eq("id", promptRow.id);
+  await ctx.supa.from("prompts").update({ asset_id: asset.id }).eq("id", promptId);
 
   return asset;
+}
+
+/**
+ * Reconciles one materialized asset's lineage against `slotPlan` (recomputed
+ * from live DB state on every run — see process()'s header note on N4):
+ * points every scene in slotPlan.linked_scene_ids at `assetId` (both sides
+ * of a shared boundary — the "owning" scene's own start/end column, plus
+ * the sibling's start_image_id when shared) and reconciles assets.shared to
+ * match. Used on the fresh-generation/redo path (generateAndPersistImage)
+ * and the reuse path (process(), which also detaches any stale sibling
+ * link separately — see detachStaleSiblingLinks) so this logic isn't
+ * duplicated inline at either call site.
+ */
+async function linkSlotAsset(
+  ctx: StageContext,
+  slotPlan: DistinctImageSlot,
+  scene: SceneRow,
+  assetId: string
+): Promise<void> {
+  const { error: sharedError } = await ctx.supa.from("assets").update({ shared: slotPlan.shared }).eq("id", assetId);
+  if (sharedError) throw new Error(`assets update (shared) failed: ${sharedError.message}`);
+
+  // Point the owning scene(s) at this asset — both sides for a shared frame.
+  for (const linkedSceneId of slotPlan.linked_scene_ids) {
+    const column =
+      linkedSceneId === scene.id ? (slotPlan.role === "start" ? "start_image_id" : "end_image_id") : "start_image_id";
+    const { error } = await ctx.supa.from("scenes").update({ [column]: assetId }).eq("id", linkedSceneId);
+    if (error) throw new Error(`scenes update (${column}) failed: ${error.message}`);
+  }
+}
+
+/**
+ * N4 companion to linkSlotAsset: clears any OTHER scene's start/end pointer
+ * that still references `assetId` but the CURRENT plan no longer links here
+ * (e.g. the user flipped transition_to_next off after this asset was
+ * generated as a shared boundary). Only meaningful on the reuse path —
+ * a freshly generated or redone asset id can't already be stale-referenced
+ * by another scene, so linkSlotAsset's call sites don't need this. Without
+ * it, a stale sibling pointer would make a future run wrongly treat that
+ * scene's own slot as "already generated" instead of planning it fresh.
+ */
+async function detachStaleSiblingLinks(
+  ctx: StageContext,
+  scenesForReel: SceneRow[],
+  slotPlan: DistinctImageSlot,
+  assetId: string
+): Promise<void> {
+  for (const other of scenesForReel) {
+    if (slotPlan.linked_scene_ids.includes(other.id)) continue;
+    const updates: Partial<Pick<SceneRow, "start_image_id" | "end_image_id">> = {};
+    if (other.start_image_id === assetId) updates.start_image_id = null;
+    if (other.end_image_id === assetId) updates.end_image_id = null;
+    if (Object.keys(updates).length === 0) continue;
+    const { error } = await ctx.supa.from("scenes").update(updates).eq("id", other.id);
+    if (error) throw new Error(`scenes update (detach stale link) failed: ${error.message}`);
+  }
 }
 
 async function generateAndPersistImage(
@@ -189,13 +283,7 @@ async function generateAndPersistImage(
     cost_log_id: costLog.id,
   });
 
-  // Point the owning scene(s) at this asset — both sides for a shared frame.
-  for (const linkedSceneId of slotPlan.linked_scene_ids) {
-    const column =
-      linkedSceneId === scene.id ? (slotPlan.role === "start" ? "start_image_id" : "end_image_id") : "start_image_id";
-    const { error } = await ctx.supa.from("scenes").update({ [column]: asset.id }).eq("id", linkedSceneId);
-    if (error) throw new Error(`scenes update (${column}) failed: ${error.message}`);
-  }
+  await linkSlotAsset(ctx, slotPlan, scene, asset.id);
 
   return { asset, version };
 }
@@ -203,7 +291,7 @@ async function generateAndPersistImage(
 async function process(_input: ImageInput, ctx: StageContext): Promise<ImageOutput> {
   const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
   const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
-  const plan = planImageSlots(scenes, reelConfig, supportsEndFrameLookup(ctx.adapters));
+  const plan = planImageSlots(scenes, reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
 
   const results: ImageSlotResult[] = [];
   for (const slotPlan of plan) {
@@ -212,6 +300,13 @@ async function process(_input: ImageInput, ctx: StageContext): Promise<ImageOutp
 
     const existingAssetId = slotPlan.role === "start" ? scene.start_image_id : scene.end_image_id;
     if (existingAssetId) {
+      // N4: generation itself isn't needed, but `plan` is recomputed from
+      // live DB state on every run — still reconcile scenes.{start,end}_image_id
+      // and assets.shared against the CURRENT plan before reusing (attach a
+      // newly-shared sibling / detach a no-longer-shared one), so lineage
+      // never silently drifts from what the plan says today.
+      await linkSlotAsset(ctx, slotPlan, scene, existingAssetId);
+      await detachStaleSiblingLinks(ctx, scenes, slotPlan, existingAssetId);
       results.push({ slot: slotPlan, asset: await getAsset(ctx.supa, existingAssetId) });
       continue;
     }
@@ -225,7 +320,7 @@ async function process(_input: ImageInput, ctx: StageContext): Promise<ImageOutp
 async function estimate(_input: ImageInput, ctx: StageContext): Promise<CostEstimate> {
   const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
   const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
-  const plan = planImageSlots(scenes, reelConfig, supportsEndFrameLookup(ctx.adapters));
+  const plan = planImageSlots(scenes, reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
 
   return ctx.costEngine.estimate(
     plan.map(() => ({
@@ -337,6 +432,26 @@ export function createImageReviewHooks(ctx: StageContext): ReviewHooks {
         "redo"
       );
       return { version };
+    },
+
+    async uploadAsset(assetId, storagePath) {
+      return uploadAssetVersion(ctx, assetId, storagePath);
+    },
+
+    async uploadNewAsset({ sceneId, role }, storagePath) {
+      if (!sceneId || !role) throw new Error("sceneId and role are required to upload an image for a new slot");
+      const { asset, version } = await createUploadedAsset(ctx, {
+        slot: role === "start" ? "start_image" : "end_image",
+        mediaType: "image",
+        storagePath,
+        sceneId,
+      });
+      // Point the scene at it, so process() treats the slot as already
+      // materialized and never generates over the upload.
+      const column = role === "start" ? "start_image_id" : "end_image_id";
+      const { error } = await ctx.supa.from("scenes").update({ [column]: asset.id }).eq("id", sceneId);
+      if (error) throw new Error(`scenes update (${column}) failed: ${error.message}`);
+      return version;
     },
 
     async revertPrompt(promptId, versionNo) {

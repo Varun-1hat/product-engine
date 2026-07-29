@@ -10,9 +10,24 @@ import { z } from "zod";
 import type { ReviewHooks } from "@/src/stages/types";
 
 export const reviewActionSchema = z.object({
-  action: z.enum(["redoPrompt", "editPrompt", "redoAsset", "revertPrompt", "revertAsset", "download", "history"]),
+  action: z.enum([
+    "redoPrompt",
+    "editPrompt",
+    "redoAsset",
+    "uploadAsset",
+    "uploadNewAsset",
+    "revertPrompt",
+    "revertAsset",
+    "download",
+    "history",
+  ]),
   promptId: z.string().uuid().optional(),
   assetId: z.string().uuid().optional(),
+  /** For 'uploadAsset'/'uploadNewAsset': the Storage path returned by the uploads endpoint. */
+  storagePath: z.string().optional(),
+  /** For 'uploadNewAsset': locates a not-yet-generated slot (no assetId exists yet). */
+  sceneId: z.string().uuid().optional(),
+  role: z.enum(["start", "end"]).optional(),
   /** For 'download': an asset_versions.id (a specific version, not the asset). */
   assetVersionId: z.string().uuid().optional(),
   text: z.string().optional(),
@@ -34,6 +49,16 @@ export async function dispatchReviewAction(hooks: ReviewHooks, input: ReviewActi
     case "redoAsset":
       if (!input.assetId) throw new Error("assetId is required for redoAsset");
       return hooks.redoAsset(input.assetId);
+
+    case "uploadAsset":
+      if (!input.assetId || !input.storagePath) throw new Error("assetId and storagePath are required for uploadAsset");
+      if (!hooks.uploadAsset) throw new Error("this stage does not support uploading an asset override");
+      return { version: await hooks.uploadAsset(input.assetId, input.storagePath) };
+
+    case "uploadNewAsset":
+      if (!input.storagePath) throw new Error("storagePath is required for uploadNewAsset");
+      if (!hooks.uploadNewAsset) throw new Error("this stage does not support uploading an asset override");
+      return { version: await hooks.uploadNewAsset({ sceneId: input.sceneId, role: input.role }, input.storagePath) };
 
     case "revertPrompt":
       if (!input.promptId || input.versionNo === undefined) {

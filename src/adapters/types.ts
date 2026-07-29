@@ -24,6 +24,9 @@ export interface AdapterCapabilities {
   min_avatar_ids?: number;
   max_avatar_ids?: number;
   supports_end_frame?: boolean; // video_broll: can it target a last frame? (Veo true, Higgsfield false)
+  supports_duration_control?: boolean; // false = clip length is whatever the model returns (Gemini Omni)
+  /** Resolutions the model only renders at its maximum duration (Veo: 1080p/4k are 8s-only). */
+  full_duration_only_resolutions?: string[];
   emits_audio?: boolean; // video_broll: strip on ingest if true (Veo true)
   accepted_inputs: string[];
   async: boolean;
@@ -110,7 +113,13 @@ export interface Adapter {
   id: string;
   category: AdapterCapabilities["category"];
   provider: string;
-  capabilities(): AdapterCapabilities;
+  /**
+   * Constraints for one concrete model. Adapters that front several models
+   * (video_broll/veo covers the three Veo 3.1 tiers + Gemini Omni Flash)
+   * answer per `variant`, so callers get that model's real limits rather than
+   * a lowest-common-denominator set. Omit `variant` for the adapter's default.
+   */
+  capabilities(variant?: string): AdapterCapabilities;
   validate(input: Partial<GenerateInput>): ValidationResult;
   estimate(input: EstimateInput): { units: number; unit_type: string; variant?: string }; // NO provider call
   generate(input: GenerateInput): Promise<GenerateResult>;

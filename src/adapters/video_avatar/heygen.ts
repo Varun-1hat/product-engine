@@ -97,6 +97,17 @@ function validateInput(input: Partial<GenerateInput>): ValidationResult {
     violations.push(`too many reference images (${imageRefCount} > ${CAPABILITIES.max_reference_images})`);
   }
 
+  // HeyGen's actual API enforces one COMBINED "video-like" slot budget:
+  // avatar looks occupy the same budget as reference videos. This is in
+  // addition to (not instead of) the min/max_avatar_ids check on
+  // avatar_ids.length alone above.
+  const combinedVideoSlots = avatarCount + videoRefCount;
+  if (combinedVideoSlots > CAPABILITIES.max_reference_videos!) {
+    violations.push(
+      `avatar_ids + reference videos (${avatarCount} + ${videoRefCount} = ${combinedVideoSlots}) exceeds the combined video-slot budget of ${CAPABILITIES.max_reference_videos}`
+    );
+  }
+
   return { ok: violations.length === 0, violations, warnings };
 }
 
@@ -303,7 +314,13 @@ export interface HeyGenLook {
   raw: unknown;
 }
 
-interface HeyGenLookRaw {
+interface HeyGenAvatarGroup {
+  group_id?: string;
+  id?: string;
+  name: string;
+}
+
+interface HeyGenAvatarLook {
   id?: string;
   look_id?: string;
   avatar_id?: string;
@@ -315,31 +332,79 @@ interface HeyGenLookRaw {
   [key: string]: unknown;
 }
 
-function extractLooksList(json: unknown): HeyGenLookRaw[] {
-  if (Array.isArray(json)) return json as HeyGenLookRaw[];
-  const obj = json as { data?: unknown; looks?: unknown; avatars?: unknown } | null | undefined;
-  if (Array.isArray(obj?.data)) return obj!.data as HeyGenLookRaw[];
-  const nestedLooks = (obj?.data as { looks?: unknown } | undefined)?.looks;
-  if (Array.isArray(nestedLooks)) return nestedLooks as HeyGenLookRaw[];
-  if (Array.isArray(obj?.looks)) return obj!.looks as HeyGenLookRaw[];
-  if (Array.isArray(obj?.avatars)) return obj!.avatars as HeyGenLookRaw[];
-  return [];
+/**
+ * Both /v3/avatars (groups) and /v3/avatars/looks return a cursor-paginated
+ * `{ data: [...], has_more, next_token }` envelope with a default page size of
+ * 20, so every listing has to be walked to the end or entries go missing.
+ */
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchAllPages<T>(providerKey: string, path: string, params: Record<string, string> = {}): Promise<T[]> {
+  const out: T[] = [];
+  let token: string | undefined;
+
+  do {
+    const query = new URLSearchParams({ ...params, limit: "50" });
+    if (token) query.set("token", token);
+
+    const url = `${HEYGEN_CONFIG.baseUrl}${path}?${query.toString()}`;
+    const headers = { "x-api-key": providerKey, "Content-Type": "application/json" };
+
+    // HeyGen rate-limits listing endpoints; back off and retry on 429.
+    let res = await fetch(url, { headers });
+    for (let attempt = 0; res.status === 429 && attempt < 5; attempt++) {
+      await sleep(1000 * 2 ** attempt);
+      res = await fetch(url, { headers });
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`heygen: GET ${path} failed (${res.status}): ${text}`);
+    }
+
+    const json = (await res.json()) as { data?: T[]; next_token?: string | null };
+    out.push(...(json.data ?? []));
+    token = json.next_token ?? undefined;
+  } while (token);
+
+  return out;
 }
 
 export async function pullAvatarLooks(providerKey: string): Promise<HeyGenLook[]> {
-  const res = await fetch(`${HEYGEN_CONFIG.baseUrl}/v3/avatars/looks`, {
-    headers: { "x-api-key": providerKey },
+  // Step 1 - Fetch the client's OWN avatar groups (GET /v3/avatars). Without
+  // ownership=private this also returns HeyGen's hundreds of public stock
+  // groups, which aren't the client's avatars and whose per-group look calls
+  // blow straight through HeyGen's rate limit.
+  const groups = await fetchAllPages<HeyGenAvatarGroup>(providerKey, "/v3/avatars", {
+    ownership: "private",
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`heygen: GET /v3/avatars/looks failed (${res.status}): ${text}`);
+
+  // Step 2 - Fetch looks per group, sequentially: firing every group at once
+  // trips HeyGen's rate limit. The look-level `id` is what POST /v3/videos
+  // wants as avatar_id.
+  const allLooks: HeyGenLook[] = [];
+
+  for (const group of groups) {
+    const groupId = group.group_id ?? group.id;
+    if (!groupId) continue;
+
+    const looks = await fetchAllPages<HeyGenAvatarLook>(providerKey, "/v3/avatars/looks", {
+      group_id: groupId,
+    });
+
+    for (const look of looks) {
+      const avatarId = look.id ?? look.look_id ?? look.avatar_id;
+      if (!avatarId) continue;
+
+      allLooks.push({
+        heygen_look_id: avatarId,
+        name: look.name ?? group.name ?? "Untitled look",
+        preview_image_url: look.preview_image_url ?? look.image_url ?? null,
+        preview_video_url: look.preview_video_url ?? look.video_url ?? null,
+        raw: { group, look },
+      });
+    }
   }
-  const json = await res.json();
-  return extractLooksList(json).map((look) => ({
-    heygen_look_id: String(look.id ?? look.look_id ?? look.avatar_id ?? ""),
-    name: look.name ?? "Untitled look",
-    preview_image_url: look.preview_image_url ?? look.image_url ?? null,
-    preview_video_url: look.preview_video_url ?? look.video_url ?? null,
-    raw: look,
-  }));
+
+  return allLooks;
 }

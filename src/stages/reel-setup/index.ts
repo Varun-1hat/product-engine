@@ -32,6 +32,7 @@ export interface ReelSetupStageContext {
 export const reelSetupInputSchema = z.object({
   display_name: z.string().min(1).optional(),
   topic: z.string().min(1),
+  topic_description: z.string().optional(),
   total_seconds_target: z.number().positive(),
   avatar_enabled: z.boolean(),
   avatar_look_id: z.string().uuid().optional(),
@@ -51,6 +52,18 @@ export interface ReelSetupOutput {
   validation: ValidationResult;
 }
 
+/**
+ * Thrown by `processReelSetup` when `validateReelSetup` fails (spec §3.3 —
+ * CapabilityGuard wiring). Carries the structured `ValidationResult` so the
+ * route handler can surface violations/warnings on the failure path too,
+ * not just on success.
+ */
+export class ReelSetupValidationError extends Error {
+  constructor(public validation: ValidationResult) {
+    super(validation.violations.join("; "));
+  }
+}
+
 export function validateReelSetup(input: ReelSetupInput, adapters: AdapterRegistry): ValidationResult {
   const violations: string[] = [];
   const warnings: string[] = [];
@@ -67,24 +80,35 @@ export function validateReelSetup(input: ReelSetupInput, adapters: AdapterRegist
     );
   }
 
-  const relevant: Array<{ category: "image" | "video_broll" | "video_avatar"; provider: string }> = [
+  // The b-roll entry carries the selected model (veo_variant), so aspect/
+  // resolution are checked against that model's limits — e.g. Gemini Omni
+  // Flash is 720p-only, while Veo 3.1 also does 1080p.
+  const relevant: Array<{ category: "image" | "video_broll" | "video_avatar"; provider: string; variant?: string }> = [
     { category: "image", provider: input.image_provider },
   ];
-  if (input.broll_provider) relevant.push({ category: "video_broll", provider: input.broll_provider });
+  if (input.broll_provider) {
+    relevant.push({ category: "video_broll", provider: input.broll_provider, variant: input.veo_variant });
+  }
   if (input.avatar_enabled) relevant.push({ category: "video_avatar", provider: "heygen" });
 
-  for (const { category, provider } of relevant) {
+  for (const { category, provider, variant } of relevant) {
     const adapter = adapters.tryGet(category, provider);
     if (!adapter) {
       warnings.push(`no adapter registered for ${category}/${provider}`);
       continue;
     }
-    const caps = adapter.capabilities();
+    const caps = adapter.capabilities(variant);
+    const label = variant ? `${provider} (${variant})` : provider;
     if (!caps.supported_aspect_ratios.includes(input.aspect_ratio)) {
-      violations.push(`aspect_ratio "${input.aspect_ratio}" is not supported by ${provider}`);
+      violations.push(`aspect_ratio "${input.aspect_ratio}" is not supported by ${label}`);
     }
     if (!caps.supported_resolutions.includes(input.resolution)) {
-      violations.push(`resolution "${input.resolution}" is not supported by ${provider}`);
+      violations.push(`resolution "${input.resolution}" is not supported by ${label}`);
+    }
+    if (caps.supports_end_frame === false) {
+      warnings.push(
+        `${label} has no last-frame interpolation — continuous scene boundaries fall back to hard cuts and no end images are generated`
+      );
     }
   }
 
@@ -116,7 +140,7 @@ export async function processReelSetup(
 ): Promise<ReelSetupOutput> {
   const validation = validateReelSetup(input, ctx.adapters);
   if (!validation.ok) {
-    throw new Error(`reel-setup validate() failed: ${validation.violations.join("; ")}`);
+    throw new ReelSetupValidationError(validation);
   }
 
   let reelId = ctx.reelId;
@@ -151,6 +175,7 @@ export async function processReelSetup(
       {
         reel_id: reelId,
         topic: input.topic,
+        topic_description: input.topic_description ?? null,
         total_seconds_target: input.total_seconds_target,
         avatar_enabled: input.avatar_enabled,
         broll_provider: input.broll_provider ?? null,

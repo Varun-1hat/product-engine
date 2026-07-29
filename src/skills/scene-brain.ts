@@ -4,7 +4,7 @@
  * built here (§13).
  */
 import { z } from "zod";
-import { callLlmJson } from "./llm";
+import { callLlmJson, type LlmUsageSink } from "./llm";
 import type { SceneBrainInput, SceneBrainOutput } from "./types";
 
 const sceneSchema = z.object({
@@ -17,7 +17,8 @@ const sceneSchema = z.object({
 
 const outputSchema = z.object({ scenes: z.array(sceneSchema).min(1) });
 
-const SYSTEM_PROMPT = [
+/** Exported so the scene page can seed its editable copy with the real default. */
+export const SCENE_BRAIN_SYSTEM_PROMPT = [
   "You are the scene-brain skill for a short-form silent product-ad video pipeline.",
   "Produce an ordered visual shot-list (a shot list, NOT a script/voiceover) for a reel.",
   "Hard rules:",
@@ -30,9 +31,10 @@ const SYSTEM_PROMPT = [
   "- description is a visual shot description only (camera framing, subject, action, setting) — never dialogue or voiceover text.",
 ].join("\n");
 
-export async function sceneBrain(input: SceneBrainInput): Promise<SceneBrainOutput> {
+export async function sceneBrain(input: SceneBrainInput, onUsage?: LlmUsageSink): Promise<SceneBrainOutput> {
   const userPrompt = JSON.stringify({
     topic: input.topic,
+    topic_description: input.topic_description ?? null,
     total_seconds_target: input.total_seconds_target,
     avatar_enabled: input.avatar_enabled,
     has_products: input.has_products,
@@ -40,9 +42,12 @@ export async function sceneBrain(input: SceneBrainInput): Promise<SceneBrainOutp
   });
 
   const result = await callLlmJson({
-    system: SYSTEM_PROMPT,
+    // The hard rules below are re-asserted deterministically after the call,
+    // so a user-edited instruction can't break the pipeline's invariants.
+    system: input.system_prompt?.trim() || SCENE_BRAIN_SYSTEM_PROMPT,
     prompt: `Generate the scene list for this reel brief:\n${userPrompt}\n\nRespond as JSON: { "scenes": [ { "type", "product_in_scene", "seconds", "transition_to_next", "description" }, ... ] }`,
     schema: outputSchema,
+    onUsage,
   });
 
   // Defensive re-assertion of the hard rules even if the model drifts —

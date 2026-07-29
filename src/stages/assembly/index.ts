@@ -13,8 +13,7 @@ import type { StageContext, StageModule, StageState } from "../types";
 import { getReelConfig, getScenesForReel } from "@/src/lib/rows";
 import { getAsset } from "@/src/lib/versioning";
 import { buildAssemblyPlan, type AssemblyMusicSource, type AssemblyPlan } from "./plan";
-import type { AdapterRegistry } from "@/src/adapters/registry";
-import type { SupportsEndFrameLookup } from "@/src/lib/routing";
+import { supportsEndFrameLookupFor } from "@/src/lib/routing";
 import type { AssetRow } from "@/src/lib/db/types";
 import type { Job } from "@/src/lib/jobs/queue";
 import type { StageId } from "@/src/lib/db/enums";
@@ -25,10 +24,6 @@ export type AssemblyInput = z.infer<typeof assemblyInputSchema>;
 export interface AssemblyOutput {
   job: Job;
   plan: AssemblyPlan;
-}
-
-function supportsEndFrameLookup(adapters: AdapterRegistry): SupportsEndFrameLookup {
-  return (provider) => adapters.tryGet("video_broll", provider)?.capabilities().supports_end_frame ?? false;
 }
 
 async function currentVersionStoragePath(
@@ -90,7 +85,7 @@ async function buildPlanForReel(ctx: StageContext): Promise<AssemblyPlan> {
     aspectRatio: reelConfig.aspect_ratio,
     resolution: reelConfig.resolution,
     fps: reelConfig.output_fps,
-    supportsEndFrame: supportsEndFrameLookup(ctx.adapters),
+    supportsEndFrame: supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant),
     music,
     outputPath,
   });

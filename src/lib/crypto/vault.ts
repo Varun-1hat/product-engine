@@ -42,7 +42,7 @@ async function readSecret(supa: ServiceClient, vaultSecretId: string): Promise<s
  * KeyResolver falls back to the sibling row if only one was ever written —
  * so adapters never need to know about the duplication.
  */
-const GOOGLE_BACKED_PROVIDERS: readonly Provider[] = ["nano_banana", "veo"];
+const GOOGLE_BACKED_PROVIDERS: readonly Provider[] = ["nano_banana", "veo", "lyria"];
 
 /** `StageContext.keys` (spec §6) — resolves a client's decrypted provider key. */
 export interface KeyResolver {
@@ -64,8 +64,7 @@ export function createKeyResolver(supa: ServiceClient): KeyResolver {
       if (data) return readSecret(supa, (data as { vault_secret_id: string }).vault_secret_id);
 
       if (GOOGLE_BACKED_PROVIDERS.includes(provider)) {
-        const sibling = GOOGLE_BACKED_PROVIDERS.find((p) => p !== provider);
-        if (sibling) {
+        for (const sibling of GOOGLE_BACKED_PROVIDERS.filter((p) => p !== provider)) {
           const { data: siblingRow, error: siblingError } = await supa
             .from("provider_keys")
             .select("vault_secret_id")

@@ -35,6 +35,23 @@ export interface Job {
   updated_at: string;
 }
 
+/**
+ * Public-safe subset of Job — review-hook `redoAsset` return values (echoed
+ * verbatim by app/api/reels/[reelId]/{image,clip,outro}/review/route.ts
+ * handlers via NextResponse.json()) must never leak `callback_token` or
+ * `payload` (BLOCK-2 — .pipeline/review.md).
+ */
+export interface PublicJob {
+  id: string;
+  status: JobStatus;
+  type: JobType;
+  provider_job_id: string | null;
+}
+
+export function toPublicJob(job: Job): PublicJob {
+  return { id: job.id, status: job.status, type: job.type, provider_job_id: job.provider_job_id };
+}
+
 export interface EnqueueInput {
   reel_id: string | null;
   scene_id?: string | null;
@@ -57,6 +74,19 @@ export interface JobQueue {
   markAwaitingProvider(jobId: string, providerJobId: string): Promise<Job>;
   complete(jobId: string, result?: Record<string, unknown>): Promise<Job>;
   fail(jobId: string, error: string, opts?: { retry?: boolean }): Promise<Job>;
+  /**
+   * Re-arms an awaiting_provider job for another poll attempt WITHOUT
+   * transitioning it to a terminal/queued state (unlike fail(), which moves
+   * a retryable job to 'queued' — a status worker/index.ts's main claim
+   * loop treats as fatal for broll_gen/avatar_gen/outro_gen, since those
+   * job types never pass through it). Bumps `attempts` by one (this queue
+   * has no other "an attempt was just spent" signal for awaiting_provider
+   * jobs — claim_awaiting_jobs deliberately leaves attempts untouched,
+   * since a poll isn't a generate attempt) so a caller-side
+   * `attempts >= max_attempts` cap still eventually terminates. Used by
+   * worker/reconcile.ts's transient-error path (N1).
+   */
+  retryLater(jobId: string, runAfter: Date, error?: string): Promise<Job>;
   release(jobId: string): Promise<void>;
   get(jobId: string): Promise<Job | null>;
 }
@@ -148,6 +178,22 @@ export function createJobQueue(supa: ServiceClient): JobQueue {
 
       const { data, error } = await supa.from("jobs").update(update).eq("id", jobId).select("*").single();
       if (error) throw new Error(`jobs.fail failed: ${error.message}`);
+      return data as Job;
+    },
+
+    async retryLater(jobId, runAfter, error) {
+      const current = await queue.get(jobId);
+      const update: Record<string, unknown> = {
+        status: "awaiting_provider",
+        attempts: (current?.attempts ?? 0) + 1,
+        run_after: runAfter.toISOString(),
+        error: error ?? null,
+        locked_by: null,
+        locked_at: null,
+      };
+
+      const { data, error: updateError } = await supa.from("jobs").update(update).eq("id", jobId).select("*").single();
+      if (updateError) throw new Error(`jobs.retryLater failed: ${updateError.message}`);
       return data as Job;
     },
 

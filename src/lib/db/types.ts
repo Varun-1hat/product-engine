@@ -86,11 +86,15 @@ export interface Reel {
 export interface ReelConfigRow {
   reel_id: string;
   topic: string;
+  /** Free-text brief giving scene-brain more context than the one-line topic. */
+  topic_description: string | null;
+  /** Per-reel override of scene-brain's instruction; null = the built-in default. */
+  scene_prompt: string | null;
   total_seconds_target: number;
   avatar_enabled: boolean;
   broll_provider: Provider | null;
   image_provider: Provider;
-  veo_variant: "standard" | "fast";
+  veo_variant: "standard" | "fast" | "lite";
   outro_provider_override: Provider | null;
   avatar_look_id: string | null;
   aspect_ratio: string;
@@ -102,6 +106,8 @@ export interface ReelConfigRow {
   outro_seconds: number;
   music_path: string | null;
   music_trim: { start_s: number; end_s: number } | null;
+  music_prompt: string | null;
+  music_provider: Provider | null;
   updated_at: string;
 }
 
@@ -114,6 +120,7 @@ export interface SceneRow {
   seconds: number;
   transition_to_next: Boundary | null;
   broll_provider_override: Provider | null;
+  end_frame_disabled: boolean;
   description: string | null;
   start_image_id: string | null;
   end_image_id: string | null;

@@ -31,6 +31,26 @@ interface AvatarGenJobPayload {
   duration_s?: number | null;
 }
 
+// SSRF guard (BLOCK-2 — .pipeline/review.md): parsed.asset.url is
+// provider-controlled input carried through a synchronous, no-I/O
+// parseWebhook() (see file header) — validate its host before this route
+// fetches it server-side. amazonaws.com is included because HeyGen's
+// rendered-video URLs are commonly S3-backed, but per .pipeline/changes.md
+// this is a defensive default, not a verified fact — confirm the exact
+// HeyGen CDN hostname and tighten this allowlist at integration time.
+const ALLOWED_HEYGEN_HOSTS = [/(^|\.)heygen\.com$/i, /(^|\.)amazonaws\.com$/i];
+
+function isAllowedDownloadUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:") return false;
+  return ALLOWED_HEYGEN_HOSTS.some((re) => re.test(url.hostname));
+}
+
 export async function POST(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token");
   if (!token) return NextResponse.json({ error: "missing callback token" }, { status: 401 });
@@ -96,6 +116,18 @@ export async function POST(req: NextRequest) {
   }
   if (!job.asset_id) {
     return NextResponse.json({ error: `job ${job.id} has no asset_id` }, { status: 500 });
+  }
+
+  if (!isAllowedDownloadUrl(parsed.asset.url)) {
+    let hostname: string;
+    try {
+      hostname = new URL(parsed.asset.url).hostname;
+    } catch {
+      hostname = parsed.asset.url;
+    }
+    const message = `heygen webhook: refusing to download from disallowed host ${hostname}`;
+    await jobs.fail(job.id, message);
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 
   const downloaded = await fetch(parsed.asset.url);

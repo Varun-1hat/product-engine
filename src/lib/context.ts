@@ -11,6 +11,7 @@ import { createCostEngine } from "./cost/engine";
 import { createKeyResolver } from "./crypto/vault";
 import { getDefaultAdapterRegistry } from "@/src/adapters/registry";
 import { createSkillRegistry } from "@/src/skills/types";
+import type { LlmUsageSink } from "@/src/skills/llm";
 import type { StageContext } from "@/src/stages/types";
 import type { ConfigStageContext } from "@/src/stages/config";
 import type { ReelSetupStageContext } from "@/src/stages/reel-setup";
@@ -27,13 +28,38 @@ export async function getReel(reelId: string): Promise<Reel> {
 export async function buildStageContext(reelId: string): Promise<StageContext> {
   const supa = createServiceClient();
   const reel = await getReel(reelId);
-  const [adapters, skills] = await Promise.all([getDefaultAdapterRegistry(), createSkillRegistry()]);
+  const costEngine = createCostEngine(supa);
+
+  // Every runtime-skill LLM call (prompt generation + orchestration) is
+  // billed to this reel, as two cost_log rows — input and output tokens are
+  // priced differently, and cost_log carries a single units/unit_type pair.
+  // Logged against the reel's current stage; `adapter` records which model
+  // actually ran. Failures here are swallowed by callLlmJson's onUsage guard
+  // so bookkeeping can never break a generation.
+  const logLlmUsage: LlmUsageSink = async (usage) => {
+    const common = {
+      reel_id: reelId,
+      client_id: reel.client_id,
+      stage: reel.current_stage,
+      provider: "anthropic" as const,
+      adapter: usage.model,
+      call_type: "generate" as const,
+      call_status: "success" as const,
+    };
+    await costEngine.log({ ...common, units: usage.input_tokens, unit_type: "input_token" });
+    await costEngine.log({ ...common, units: usage.output_tokens, unit_type: "output_token" });
+  };
+
+  const [adapters, skills] = await Promise.all([
+    getDefaultAdapterRegistry(),
+    createSkillRegistry(logLlmUsage),
+  ]);
 
   return {
     reelId,
     clientId: reel.client_id,
     supa,
-    costEngine: createCostEngine(supa),
+    costEngine,
     adapters,
     skills,
     jobs: createJobQueue(supa),

@@ -1,159 +1,91 @@
 "use client";
 
-import { useEffect, useState, use as usePromise } from "react";
+import { use as usePromise } from "react";
 import Link from "next/link";
 import { Button } from "@/app/components/ui/button";
-import { Input } from "@/app/components/ui/input";
-import { Label } from "@/app/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle } from "@/app/components/ui/card";
 import { Badge } from "@/app/components/ui/badge";
+import { SpendBar } from "@/app/components/SpendBar";
+import { useApiResource } from "@/app/hooks/useApiResource";
+import { routes } from "@/src/lib/routes";
+import type { StageId } from "@/src/lib/db/enums";
 
-interface ConfigResponse {
+interface ClientResponse {
   client: { id: string; display_name: string };
-  client_config: { brand_name: string | null; default_tagline: string | null };
-  avatars: Array<{ id: string; name: string; preview_image_url: string | null }>;
-  products: Array<{ id: string; name: string }>;
 }
 
-export default function ClientDetailPage({ params }: { params: Promise<{ clientId: string }> }) {
+interface ReelWithSpend {
+  id: string;
+  display_name: string;
+  status: string;
+  current_stage: StageId;
+  spent: { total_usd: number; by_stage: Record<string, number> };
+}
+
+interface ReelsResponse {
+  reels: ReelWithSpend[];
+}
+
+/**
+ * Client dashboard (spec §2.3) — reel list + spend + actions. Replaces the
+ * deleted app/(app)/dashboard page's ClientReels logic (ported below) plus
+ * this page's own former brand-kit/keys/avatars/products forms, which now
+ * live under Config (§2.4).
+ */
+export default function ClientDashboardPage({ params }: { params: Promise<{ clientId: string }> }) {
   const { clientId } = usePromise(params);
-  const [data, setData] = useState<ConfigResponse | null>(null);
-  const [brandName, setBrandName] = useState("");
-  const [tagline, setTagline] = useState("");
-  const [heygenKey, setHeygenKey] = useState("");
-  const [googleKey, setGoogleKey] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  async function load() {
-    const res = await fetch(`/api/clients/${clientId}`);
-    if (!res.ok) return;
-    const json = (await res.json()) as ConfigResponse;
-    setData(json);
-    setBrandName(json.client_config.brand_name ?? "");
-    setTagline(json.client_config.default_tagline ?? "");
-  }
+  const { data: clientData, loading: clientLoading, error: clientError } = useApiResource<ClientResponse>(
+    `/api/clients/${clientId}`
+  );
+  const { data: reelsData, loading: reelsLoading, error: reelsError } = useApiResource<ReelsResponse>(
+    `/api/clients/${clientId}/reels`
+  );
 
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clientId]);
-
-  async function saveBrandKit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      const provider_keys = [
-        ...(googleKey ? [{ provider: "veo" as const, api_key: googleKey }] : []),
-        ...(heygenKey ? [{ provider: "heygen" as const, api_key: heygenKey }] : []),
-      ];
-      const res = await fetch(`/api/clients/${clientId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          brand_kit: { brand_name: brandName, default_tagline: tagline },
-          ...(provider_keys.length ? { provider_keys } : {}),
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? "save failed");
-      setHeygenKey("");
-      setGoogleKey("");
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (!data) return <main className="p-8 text-sm text-muted-foreground">Loading…</main>;
+  const reels = reelsData?.reels ?? [];
 
   return (
     <main className="mx-auto flex max-w-3xl flex-col gap-6 p-8">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">{data.client.display_name}</h1>
-        <Link href={`/reels/new?client_id=${clientId}`}>
-          <Button>New reel</Button>
-        </Link>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Brand kit &amp; provider keys</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={saveBrandKit} className="flex flex-col gap-3">
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="brand_name">Brand name</Label>
-              <Input id="brand_name" value={brandName} onChange={(e) => setBrandName(e.target.value)} />
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="tagline">Default tagline (outro)</Label>
-              <Input id="tagline" value={tagline} onChange={(e) => setTagline(e.target.value)} />
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="google_key">Google/Gemini key (covers Nano Banana + Veo)</Label>
-              <Input
-                id="google_key"
-                type="password"
-                value={googleKey}
-                onChange={(e) => setGoogleKey(e.target.value)}
-                placeholder="leave blank to keep existing"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="heygen_key">HeyGen key</Label>
-              <Input
-                id="heygen_key"
-                type="password"
-                value={heygenKey}
-                onChange={(e) => setHeygenKey(e.target.value)}
-                placeholder="leave blank to keep existing"
-              />
-            </div>
-            <Button type="submit" disabled={saving} className="w-fit">
-              {saving ? "Saving…" : "Save"}
+      <Link href={routes.clients()} className="text-sm text-muted-foreground hover:underline">
+        ← All clients
+      </Link>
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-2xl font-semibold">
+          {clientLoading ? "Loading…" : clientData?.client.display_name ?? "Client"}
+        </h1>
+        <div className="flex items-center gap-2">
+          <Link href={routes.clientConfig(clientId)}>
+            <Button variant="ghost" size="sm">
+              Config
             </Button>
-            {error ? <span className="text-xs text-destructive">{error}</span> : null}
-          </form>
-        </CardContent>
-      </Card>
+          </Link>
+          <Link href={routes.newReel(clientId)}>
+            <Button>New reel</Button>
+          </Link>
+        </div>
+      </div>
+      {clientError ? <p className="text-sm text-destructive">{clientError}</p> : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Avatars (HeyGen looks)</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {data.avatars.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              None pulled yet — save a HeyGen key above, then refresh in a few seconds (avatar_pull runs in the worker).
-            </p>
-          ) : (
-            <div className="flex flex-wrap gap-3">
-              {data.avatars.map((a) => (
-                <Badge key={a.id} variant="secondary">
-                  {a.name}
-                </Badge>
-              ))}
+      <div className="flex flex-col gap-3">
+        {reelsLoading ? <p className="text-sm text-muted-foreground">Loading reels…</p> : null}
+        {reelsError ? <p className="text-sm text-destructive">{reelsError}</p> : null}
+        {!reelsLoading && !reelsError && reels.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No reels yet.</p>
+        ) : null}
+        {reels.map((reel) => (
+          <div key={reel.id} className="rounded-md border border-border p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <Link href={routes.reelStage(reel.id, reel.current_stage)} className="text-sm font-medium underline">
+                {reel.display_name}
+              </Link>
+              <div className="flex gap-1">
+                <Badge variant="outline">{reel.current_stage}</Badge>
+                <Badge variant={reel.status === "assembled" ? "default" : "secondary"}>{reel.status}</Badge>
+              </div>
             </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Products ({data.products.length})</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-wrap gap-2">
-          {data.products.map((p) => (
-            <Badge key={p.id} variant="outline">
-              {p.name}
-            </Badge>
-          ))}
-        </CardContent>
-      </Card>
+            <SpendBar spent={reel.spent} />
+          </div>
+        ))}
+      </div>
     </main>
   );
 }

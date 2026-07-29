@@ -49,8 +49,9 @@ let defaultRegistry: AdapterRegistry | null = null;
 
 /**
  * The registry wired with every adapter this build ships (wave 1 full,
- * Higgsfield wave-2, tts/music stubs — spec §3.4/§13: the seam exists so
- * dropped providers slot in later with no orchestration change). Each
+ * Higgsfield wave-2, music via ElevenLabs/Lyria, tts stub — spec §3.4/§13:
+ * the seam exists so dropped providers slot in later with no
+ * orchestration change). Each
  * adapter factory takes a `{ storage: StorageClient }` dependency (used to
  * persist provider output — see §3.1-§3.3 "download/upload to Storage").
  * Lazily built + cached so importing this module doesn't eagerly construct
@@ -71,14 +72,16 @@ export async function getDefaultAdapterRegistry(): Promise<AdapterRegistry> {
     { createHeygenAdapter },
     { createHiggsfieldAdapter },
     { createTtsStubAdapter },
-    { createMusicStubAdapter },
+    { createElevenLabsMusicAdapter },
+    { createLyriaAdapter },
   ] = await Promise.all([
     import("./image/nano_banana"),
     import("./video_broll/veo"),
     import("./video_avatar/heygen"),
     import("./video_broll/higgsfield"),
     import("./tts/stub"),
-    import("./music/stub"),
+    import("./music/elevenlabs"),
+    import("./music/lyria"),
   ]);
 
   defaultRegistry = createAdapterRegistry([
@@ -87,7 +90,8 @@ export async function getDefaultAdapterRegistry(): Promise<AdapterRegistry> {
     createHeygenAdapter({ storage }),
     createHiggsfieldAdapter({ storage }),
     createTtsStubAdapter(),
-    createMusicStubAdapter(),
+    createElevenLabsMusicAdapter({ storage }),
+    createLyriaAdapter({ storage }),
   ]);
   return defaultRegistry;
 }

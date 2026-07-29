@@ -5,15 +5,17 @@
  * Supabase project (none is provisioned for this build; see
  * .pipeline/changes.md "Known gaps" #5). It supports exactly the query
  * shapes this codebase actually issues:
- *   .from(table).select()/.insert()/.update()/.upsert(), .eq(), .order(),
- *   .limit(), .single(), .maybeSingle(), and a bare-awaited builder (used by
+ *   .from(table).select()/.insert()/.update()/.upsert()/.delete(), .eq(),
+ *   .in() (delete-by-omission only — e.g. src/stages/scene/index.ts's
+ *   `.delete().in("id", toDelete)`), .order(), .limit(), .single(),
+ *   .maybeSingle(), and a bare-awaited builder (used by
  *   src/lib/cost/engine.ts's rate_card lookup and src/lib/versioning.ts's
  *   plain `.update().eq(...)` calls with no terminal .select()).
  *   .storage.from(bucket).upload()/.download()/.createSignedUrl()/.remove().
  *   .rpc(name, args) — an escape hatch, throws unless a handler is
  *   registered via `_registerRpc` (nothing in the tests below needs it, but
  *   failing loudly beats silently returning undefined).
- * It is NOT a general Postgrest emulator — no or/gt/lt/in, no joins.
+ * It is NOT a general Postgrest emulator — no or/gt/lt beyond `.in()`, no joins.
  *
  * Mocking boundary: tests `vi.mock("@/src/lib/supabase/service", ...)` to
  * swap `createServiceClient()` for one of these, then exercise the REAL
@@ -49,11 +51,13 @@ function fail(error: PgError): { data: null; error: PgError } {
   return { data: null, error };
 }
 
-type ExecMode = "select" | "insert" | "update" | "upsert" | null;
+type ExecMode = "select" | "insert" | "update" | "upsert" | "delete" | null;
 
 class FakeQueryBuilder {
   private mode: ExecMode = null;
   private filters: Array<[string, unknown]> = [];
+  /** `.in(col, vals)` filters — kept separate from `filters` since matching them is `vals.includes(row[col])`, not `===`. */
+  private inFilters: Array<[string, unknown[]]> = [];
   private payload: FakeRow | FakeRow[] | null = null;
   private upsertConflictCol = "id";
   private orderCol: string | null = null;
@@ -86,8 +90,17 @@ class FakeQueryBuilder {
     this.upsertConflictCol = opts?.onConflict ?? "id";
     return this;
   }
+  delete(): this {
+    this.mode = "delete";
+    return this;
+  }
   eq(col: string, val: unknown): this {
     this.filters.push([col, val]);
+    return this;
+  }
+  /** Delete-by-omission support (src/stages/scene/index.ts) — membership, not general Postgrest `in`. */
+  in(col: string, vals: unknown[]): this {
+    this.inFilters.push([col, vals]);
     return this;
   }
   order(col: string, opts?: { ascending?: boolean }): this {
@@ -101,7 +114,11 @@ class FakeQueryBuilder {
   }
 
   private matching(): FakeRow[] {
-    return this.rows().filter((row) => this.filters.every(([col, val]) => row[col] === val));
+    return this.rows().filter(
+      (row) =>
+        this.filters.every(([col, val]) => row[col] === val) &&
+        this.inFilters.every(([col, vals]) => vals.includes(row[col]))
+    );
   }
 
   private execSelect(): { data: FakeRow[]; error: null } {
@@ -152,10 +169,22 @@ class FakeQueryBuilder {
     return ok([row]);
   }
 
+  /** Removes matched rows from the underlying table in place (keeps the same array reference alive for `_tables`). */
+  private execDelete(): { data: FakeRow[]; error: null } {
+    const table = this.rows();
+    const matched = this.matching();
+    const matchedSet = new Set(matched);
+    const remaining = table.filter((row) => !matchedSet.has(row));
+    table.length = 0;
+    table.push(...remaining);
+    return ok(matched);
+  }
+
   private exec(): { data: unknown; error: PgError | null } {
     if (this.mode === "insert") return this.execInsert();
     if (this.mode === "update") return this.execUpdate();
     if (this.mode === "upsert") return this.execUpsert();
+    if (this.mode === "delete") return this.execDelete();
     return this.execSelect();
   }
 

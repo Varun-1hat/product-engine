@@ -16,7 +16,7 @@ export function CapabilityGuard({ validation, children }: CapabilityGuardProps) 
         </ul>
       ) : null}
       {validation.warnings.length > 0 ? (
-        <ul className="flex flex-col gap-1 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+        <ul className="flex flex-col gap-1 rounded-md border border-warning/40 bg-warning/10 p-2 text-xs text-warning">
           {validation.warnings.map((w, i) => (
             <li key={i}>{w}</li>
           ))}

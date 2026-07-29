@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { StorageClient } from "@/src/lib/storage";
+import { VEO_CONFIG } from "@/src/adapters/config";
 
 const generateVideosMock = vi.fn();
 const getVideosOperationMock = vi.fn();
@@ -116,7 +117,7 @@ describe("createVeoAdapter", () => {
     expect(generateVideosMock).not.toHaveBeenCalled();
   });
 
-  it("generate() requests durationSeconds via billableDurationS and returns the operation name as provider_job_id", async () => {
+  it("generate() forces 8s when an end frame or 1080p is requested, and returns the operation name as provider_job_id", async () => {
     generateVideosMock.mockResolvedValue({ name: "operations/abc123", done: false });
     const storage = fakeStorage();
     const adapter = createVeoAdapter({ storage });
@@ -138,15 +139,38 @@ describe("createVeoAdapter", () => {
 
     expect(result.status).toBe("pending");
     expect(result.provider_job_id).toBe("operations/abc123");
-    expect(result.units).toBe(4); // billableDurationS(3) === 4
+    // Veo requires 8s whenever lastFrame or 1080p is in play (both here), so
+    // the requested 3s is overridden — and we're billed for what it generates.
+    expect(result.units).toBe(8);
     expect(result.unit_type).toBe("second");
     expect(result.variant).toBe("fast");
 
     expect(generateVideosMock).toHaveBeenCalledTimes(1);
     const call = generateVideosMock.mock.calls[0][0];
-    expect(call.model).toBe("veo-3.1-fast-generate-preview");
-    expect(call.config.durationSeconds).toBe(4);
+    expect(call.model).toBe(VEO_CONFIG.models.fast);
+    expect(call.config.durationSeconds).toBe(8);
     expect(call.config.lastFrame).toBeTruthy();
+  });
+
+  it("generate() rounds duration up via billableDurationS when neither an end frame nor 1080p forces 8s", async () => {
+    generateVideosMock.mockResolvedValue({ name: "operations/dur", done: false });
+    const adapter = createVeoAdapter({ storage: fakeStorage() });
+
+    const result = await adapter.generate({
+      client_id: "c1",
+      reel_id: "r1",
+      prompt: "a bottle spinning",
+      start_image: { base64: "c3RhcnQ=" },
+      aspect_ratio: "16:9",
+      resolution: "720p",
+      duration_s: 3,
+      variant: "fast",
+      provider_key: "k",
+      idempotency_key: "idem-dur",
+    });
+
+    expect(result.units).toBe(4); // billableDurationS(3) === 4
+    expect(generateVideosMock.mock.calls[0][0].config.durationSeconds).toBe(4);
   });
 
   it("generate() uses the standard model id for the standard variant", async () => {
@@ -165,8 +189,11 @@ describe("createVeoAdapter", () => {
       idempotency_key: "idem-2",
     });
 
+    // Asserted against the config rather than a hardcoded id — the claim here
+    // is "the standard variant uses the standard-tier model id", not what that
+    // id currently happens to be (see VEO_CONFIG.models).
     const call = generateVideosMock.mock.calls[0][0];
-    expect(call.model).toBe("veo-3.1-generate-preview");
+    expect(call.model).toBe(VEO_CONFIG.models.standard);
     expect(call.config.lastFrame).toBeUndefined();
   });
 

@@ -6,6 +6,8 @@
  * (outro routing) and Stage 9 (assembly seam trimming) all call through.
  */
 import type { Boundary, SceneType } from "@/src/lib/db/enums";
+import type { AdapterRegistry } from "@/src/adapters/registry";
+import { VEO_CONFIG } from "@/src/adapters/config";
 
 export interface SceneLike {
   id: string;
@@ -13,6 +15,8 @@ export interface SceneLike {
   type: SceneType;
   transition_to_next: Boundary | null;
   broll_provider_override: string | null;
+  /** User override: skip the end-frame image for this scene even if the effective model supports it. */
+  end_frame_disabled?: boolean;
 }
 
 export interface ReelConfigLike {
@@ -22,6 +26,21 @@ export interface ReelConfigLike {
 
 /** A capability lookup: does this effective provider support an end frame? */
 export type SupportsEndFrameLookup = (provider: string) => boolean;
+
+/**
+ * The one lookup every stage uses. Asks the adapter about the *selected
+ * model*, not the provider: Veo's adapter fronts four Google models and only
+ * Veo 3.1 / 3.1 Fast interpolate to a last frame. Without the variant, a
+ * Lite/Omni reel would pay for end images it can't use and claim "continuous"
+ * boundaries it can't produce.
+ */
+export function supportsEndFrameLookupFor(
+  adapters: AdapterRegistry,
+  veoVariant: string
+): SupportsEndFrameLookup {
+  return (provider) =>
+    adapters.tryGet("video_broll", provider)?.capabilities(veoVariant).supports_end_frame ?? false;
+}
 
 /** Effective b-roll model for a scene = COALESCE(scene override, reel default). */
 export function effectiveBrollModel(
@@ -51,6 +70,7 @@ export function effectiveBoundary(
   supportsEndFrame: SupportsEndFrameLookup
 ): Boundary {
   if (sceneN.type !== "broll") return "hard_cut";
+  if (sceneN.end_frame_disabled) return "hard_cut";
   if (sceneN.transition_to_next !== "continuous") return "hard_cut";
   if (!sceneNPlus1 || sceneNPlus1.type !== "broll") return "hard_cut";
 
@@ -89,6 +109,7 @@ export function needsEndImage(
   supportsEndFrame: SupportsEndFrameLookup
 ): boolean {
   if (scene.type !== "broll") return false;
+  if (scene.end_frame_disabled) return false;
   const model = effectiveBrollModel(scene, reelConfig);
   if (!model) return false;
   return supportsEndFrame(model);

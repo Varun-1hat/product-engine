@@ -6,7 +6,8 @@
  * arrays used for UI dropdowns / validation).
  */
 
-export const PROVIDERS = ["nano_banana", "veo", "higgsfield", "heygen", "elevenlabs"] as const;
+/** `anthropic` is the runtime-skills LLM — not user-selectable, but billed and logged like any other provider. */
+export const PROVIDERS = ["nano_banana", "veo", "higgsfield", "heygen", "elevenlabs", "lyria", "anthropic"] as const;
 export type Provider = (typeof PROVIDERS)[number];
 
 export const CATEGORIES = ["image", "video_broll", "video_avatar", "tts", "music"] as const;
@@ -39,6 +40,7 @@ export const SLOTS = [
   "outro_clip",
   "end_frame_image",
   "final_render",
+  "music_track",
 ] as const;
 export type Slot = (typeof SLOTS)[number];
 
@@ -100,7 +102,8 @@ export type AspectRatio = (typeof ASPECT_RATIOS)[number];
 export const RESOLUTIONS = ["720p", "1080p"] as const;
 export type Resolution = (typeof RESOLUTIONS)[number];
 
-export const VEO_VARIANTS = ["standard", "fast"] as const;
+/** Selectable Google b-roll models. 'omni' is Gemini Omni Flash (Interactions API), the rest are Veo 3.1 tiers. */
+export const VEO_VARIANTS = ["standard", "fast", "lite", "omni"] as const;
 export type VeoVariant = (typeof VEO_VARIANTS)[number];
 
 export const UNIT_TYPES = ["image", "second", "video", "credit", "character"] as const;

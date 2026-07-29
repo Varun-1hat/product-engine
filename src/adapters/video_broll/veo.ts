@@ -34,30 +34,11 @@ import { dimensionsFor } from "../dimensions";
 import { resolveAssetRefBytes } from "../assetRef";
 import { modelPromptVeo } from "@/src/skills/model-prompt/veo";
 import { buildPollResultPath, type StorageClient } from "@/src/lib/storage";
-import type { VeoVariant } from "@/src/lib/db/enums";
-
-const CAPABILITIES: AdapterCapabilities = {
-  category: "video_broll",
-  provider: "veo",
-  min_duration_s: 4,
-  max_duration_s: 8,
-  supported_durations_s: [4, 6, 8],
-  supported_aspect_ratios: ["16:9", "9:16"],
-  supported_resolutions: ["720p", "1080p"],
-  max_reference_images: 2, // start + end frame
-  supports_end_frame: true,
-  emits_audio: true,
-  accepted_inputs: ["prompt", "start_image", "end_image"],
-  async: true,
-  billing_unit: "second",
-};
+import { VEO_VARIANTS, type VeoVariant } from "@/src/lib/db/enums";
+import { isVeoVariant, veoCapabilitiesFor, VEO_VARIANT_CAPABILITIES as VARIANT_CAPABILITIES } from "./veoCapabilities";
 
 export interface VeoDeps {
   storage: StorageClient;
-}
-
-function isVeoVariant(value: string | undefined): value is VeoVariant {
-  return value === "standard" || value === "fast";
 }
 
 /**
@@ -91,26 +72,52 @@ export function composeVeoVariant(bareVariant: string, resolution: string): stri
   return `${bareVariant}@${resolution}`;
 }
 
+/** Validated against the selected model's own limits, not against all four. */
 function validateInput(input: Partial<GenerateInput>): ValidationResult {
   const violations: string[] = [];
   const warnings: string[] = [];
 
-  if (!input.prompt || !input.prompt.trim()) violations.push("prompt is required");
-  if (input.aspect_ratio && !CAPABILITIES.supported_aspect_ratios.includes(input.aspect_ratio)) {
-    violations.push(`aspect_ratio "${input.aspect_ratio}" is not supported by veo`);
-  }
-  if (input.resolution && !CAPABILITIES.supported_resolutions.includes(input.resolution)) {
-    violations.push(`resolution "${input.resolution}" is not supported by veo`);
-  }
   if (input.variant && !isVeoVariant(input.variant)) {
-    violations.push(`variant "${input.variant}" must be one of standard|fast`);
+    return {
+      ok: false,
+      violations: [`variant "${input.variant}" must be one of ${VEO_VARIANTS.join("|")}`],
+      warnings,
+    };
+  }
+  const variant: VeoVariant = isVeoVariant(input.variant) ? input.variant : "fast";
+  const caps = VARIANT_CAPABILITIES[variant];
+  const model = VEO_CONFIG.models[variant];
+
+  if (!input.prompt || !input.prompt.trim()) violations.push("prompt is required");
+  if (input.aspect_ratio && !caps.supported_aspect_ratios.includes(input.aspect_ratio)) {
+    violations.push(`aspect_ratio "${input.aspect_ratio}" is not supported by ${model}`);
+  }
+  if (input.resolution && !caps.supported_resolutions.includes(input.resolution)) {
+    violations.push(`resolution "${input.resolution}" is not supported by ${model}`);
   }
   if (!input.start_image) {
     violations.push("start_image is required for veo generate()");
   }
-  if (input.duration_s != null && input.duration_s > (CAPABILITIES.max_duration_s ?? 8)) {
+  if (input.end_image && !caps.supports_end_frame) {
+    warnings.push(`${model} has no last-frame interpolation — the end frame is ignored and the boundary is a hard cut`);
+  }
+  if (input.duration_s != null && caps.supports_duration_control === false) {
+    warnings.push(`${model} has no duration control — the clip comes back at the model's own length and Stage 6 trims it`);
+  }
+  if (input.duration_s != null && caps.max_duration_s != null && input.duration_s > caps.max_duration_s) {
     warnings.push(
-      `requested duration_s (${input.duration_s}) exceeds Veo's ~${CAPABILITIES.max_duration_s}s max — will generate at ${CAPABILITIES.max_duration_s}s and Stage 6 must trim`
+      `requested duration_s (${input.duration_s}) exceeds ${model}'s ~${caps.max_duration_s}s max — will generate at ${caps.max_duration_s}s and Stage 6 must trim`
+    );
+  }
+  if (
+    input.resolution &&
+    caps.full_duration_only_resolutions?.includes(input.resolution) &&
+    input.duration_s != null &&
+    caps.max_duration_s != null &&
+    input.duration_s < caps.max_duration_s
+  ) {
+    warnings.push(
+      `${model} only renders ${input.resolution} at ${caps.max_duration_s}s — generating at ${caps.max_duration_s}s and Stage 6 trims to ${input.duration_s}s`
     );
   }
 
@@ -144,6 +151,99 @@ async function resolveVideoBytes(
   throw new Error("veo: generated video has neither videoBytes nor uri");
 }
 
+/**
+ * Omni interactions aren't Veo operations, so poll() (which only gets a
+ * provider_job_id) needs to tell the two apart — omni ids are stored prefixed.
+ */
+const OMNI_JOB_PREFIX = "omni:";
+
+/**
+ * Gemini Omni Flash (preview) — image-to-video over the Interactions API.
+ * `<FIRST_FRAME>` binds the scene's start image as the opening frame; there is
+ * no last-frame interpolation and no duration control (docs "Limitations"), so
+ * the clip is billed/trimmed against the requested duration like any other.
+ * background+store so the result is retrievable later by the existing
+ * poll/reconcile worker instead of blocking the request.
+ */
+async function generateOmni(
+  input: GenerateInput,
+  startImage: { data: string; mimeType: string },
+  prompt: string,
+  durationS: number
+): Promise<GenerateResult> {
+  const ai = new GoogleGenAI({ apiKey: input.provider_key });
+  const interaction = await ai.interactions.create({
+    model: VEO_CONFIG.models.omni,
+    input: [
+      { type: "image", data: startImage.data, mime_type: startImage.mimeType },
+      { type: "text", text: `<FIRST_FRAME> ${prompt}` },
+    ],
+    response_format: { type: "video", aspect_ratio: input.aspect_ratio, delivery: "uri" },
+    generation_config: { video_config: { task: "image_to_video" } },
+    background: true,
+    store: true,
+  } as never);
+
+  const id = (interaction as { id?: string }).id;
+  if (!id) throw new Error("omni: interactions.create returned no id to poll later");
+
+  return {
+    status: "pending",
+    provider_job_id: `${OMNI_JOB_PREFIX}${id}`,
+    units: durationS,
+    unit_type: "second",
+    variant: "omni",
+    raw: { id, model: VEO_CONFIG.models.omni },
+  };
+}
+
+async function pollOmni(
+  interactionId: string,
+  providerKey: string,
+  storage: StorageClient
+): Promise<GenerateResult> {
+  const ai = new GoogleGenAI({ apiKey: providerKey });
+  const interaction = await ai.interactions.get(interactionId);
+  const status = (interaction as { status?: string }).status;
+  const video = interaction.output_video;
+
+  if (status === "failed" || status === "cancelled") {
+    throw new Error(`omni: interaction ${interactionId} ended with status "${status}"`);
+  }
+  if (status !== "completed" || !video) {
+    return {
+      status: "pending",
+      provider_job_id: `${OMNI_JOB_PREFIX}${interactionId}`,
+      units: VEO_CONFIG.defaultDurationS,
+      unit_type: "second",
+      raw: interaction,
+    };
+  }
+
+  const { data, mimeType } = await resolveVideoBytes(
+    { videoBytes: video.data, uri: video.uri, mimeType: video.mime_type },
+    providerKey
+  );
+  const ext = mimeType.split("/")[1] ?? "mp4";
+  const path = buildPollResultPath({ provider: "veo", provider_job_id: interactionId, ext });
+  await storage.upload("assets", path, data, mimeType);
+
+  // Placeholder metadata — the orchestrator overwrites it from job.payload
+  // (same contract as the Veo poll path below).
+  const { width, height } = dimensionsFor("9:16", "1080p");
+  return {
+    status: "succeeded",
+    asset: {
+      storage_path: path,
+      mime: mimeType,
+      metadata: { width, height, aspect: "9:16", resolution: "1080p", duration_s: VEO_CONFIG.defaultDurationS, codec: "h264" },
+    },
+    units: VEO_CONFIG.defaultDurationS,
+    unit_type: "second",
+    raw: interaction,
+  };
+}
+
 export function createVeoAdapter(deps: VeoDeps): Adapter {
   const { storage } = deps;
 
@@ -154,16 +254,38 @@ export function createVeoAdapter(deps: VeoDeps): Adapter {
     }
 
     const variant: VeoVariant = isVeoVariant(input.variant) ? input.variant : "fast";
-    const generatedDurationS = billableDurationS(input.duration_s);
+    const caps = VARIANT_CAPABILITIES[variant];
+    const useEndFrame = Boolean(input.end_image) && Boolean(caps.supports_end_frame);
+    // This model's own duration rule: 8s whenever it interpolates to a last
+    // frame or renders a resolution it only offers at full length.
+    const generatedDurationS =
+      useEndFrame || caps.full_duration_only_resolutions?.includes(input.resolution)
+        ? caps.max_duration_s ?? 8
+        : billableDurationS(input.duration_s);
     const payload = modelPromptVeo(input.prompt, {
       aspectRatio: input.aspect_ratio,
       resolution: input.resolution,
     });
 
     const startImage = await resolveAssetRefBytes(input.start_image!);
-    const endImage = input.end_image ? await resolveAssetRefBytes(input.end_image) : null;
+    const endImage = useEndFrame ? await resolveAssetRefBytes(input.end_image!) : null;
+
+    if (variant === "omni") {
+      return generateOmni(input, startImage, payload.prompt, generatedDurationS);
+    }
 
     const ai = new GoogleGenAI({ apiKey: input.provider_key });
+    console.log({
+      model: VEO_CONFIG.models[variant],
+      prompt: payload.prompt,
+      imageMime: startImage.mimeType,
+      imageSize: startImage.data.length,
+      hasEndFrame: !!endImage,
+      aspect: payload.aspectRatio,
+      resolution: payload.resolution,
+      duration: generatedDurationS,
+      negativePrompt: payload.negativePrompt,
+    });
     const op = await ai.models.generateVideos({
       model: VEO_CONFIG.models[variant],
       prompt: payload.prompt,
@@ -193,11 +315,16 @@ export function createVeoAdapter(deps: VeoDeps): Adapter {
   }
 
   async function poll(providerJobId: string, providerKey: string): Promise<GenerateResult> {
+    if (providerJobId.startsWith(OMNI_JOB_PREFIX)) {
+      return pollOmni(providerJobId.slice(OMNI_JOB_PREFIX.length), providerKey, storage);
+    }
+
     const ai = new GoogleGenAI({ apiKey: providerKey });
     const handle = new GenerateVideosOperation();
     handle.name = providerJobId;
     const op = await ai.operations.getVideosOperation({ operation: handle });
-
+    console.log("op", op);
+    console.dir(op, { depth: null });
     if (!op.done) {
       return {
         status: "pending",
@@ -248,7 +375,7 @@ export function createVeoAdapter(deps: VeoDeps): Adapter {
     id: "veo@1",
     category: "video_broll",
     provider: "veo",
-    capabilities: () => CAPABILITIES,
+    capabilities: (variant?: string) => veoCapabilitiesFor(variant),
     validate: validateInput,
     estimate(input: EstimateInput) {
       const units = billableDurationS(input.duration_s);

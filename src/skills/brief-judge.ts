@@ -5,7 +5,7 @@
  * grading) — build-last per spec, kept intentionally lightweight.
  */
 import { z } from "zod";
-import { callLlmJson } from "./llm";
+import { callLlmJson, type LlmUsageSink } from "./llm";
 import type { BriefJudgeInput, BriefJudgeOutput } from "./types";
 
 const outputSchema = z.object({
@@ -19,12 +19,13 @@ const SYSTEM_PROMPT = [
   "You are NOT a gate. Your output is only ever shown as a hint in a human review UI and never blocks any action.",
 ].join("\n");
 
-export async function briefJudge(input: BriefJudgeInput): Promise<BriefJudgeOutput> {
+export async function briefJudge(input: BriefJudgeInput, onUsage?: LlmUsageSink): Promise<BriefJudgeOutput> {
   const userPrompt = JSON.stringify({ brief: input.brief, brand: input.brand, asset: input.assetRef });
 
   return callLlmJson({
     system: SYSTEM_PROMPT,
     prompt: `Judge this asset against the brief:\n${userPrompt}\n\nRespond as JSON: { "score": number (0-1), "notes": string }`,
     schema: outputSchema,
+    onUsage,
   });
 }

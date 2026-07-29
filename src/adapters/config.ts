@@ -14,6 +14,11 @@ export const VEO_CONFIG = {
   models: {
     standard: "veo-3.1-generate-preview",
     fast: "veo-3.1-fast-generate-preview",
+    lite: "veo-3.1-lite-generate-preview",
+    // Gemini Omni Flash — same Gemini API key, but the Interactions API
+    // (ai.interactions.*) rather than generateVideos. No last-frame
+    // interpolation and no duration control (see the adapter's omni branch).
+    omni: "gemini-omni-flash-preview",
   } as const,
   // Veo produces ~8s clips; default path requests 8s and Stage 6 trims to
   // scene.seconds. supported_durations_s is only used if/when the SDK is
@@ -39,11 +44,36 @@ export const HEYGEN_CONFIG = {
 } as const;
 
 export const HIGGSFIELD_CONFIG = {
+  // N7: no trailing /v1 here — src/adapters/video_broll/higgsfield.ts
+  // already appends the full /v1/generations path(s) itself; keeping it in
+  // both places doubled it (…/v1/v1/generations).
   get baseUrl() {
-    return process.env.HIGGSFIELD_BASE_URL ?? "https://api.higgsfield.ai/v1";
+    return process.env.HIGGSFIELD_BASE_URL ?? "https://api.higgsfield.ai";
   },
   pollIntervalMs: 10_000,
   pollTimeoutMs: 10 * 60 * 1000,
+} as const;
+
+export const ELEVENLABS_CONFIG = {
+  get baseUrl() {
+    return process.env.ELEVENLABS_BASE_URL ?? "https://api.elevenlabs.io";
+  },
+  model: "music_v1",
+  minDurationS: 10,
+  maxDurationS: 300,
+  defaultDurationS: 30,
+} as const;
+
+export const LYRIA_CONFIG = {
+  // Lyria RealTime is only exposed on the v1alpha surface of the Gemini API.
+  model: "models/lyria-realtime-exp",
+  apiVersion: "v1alpha",
+  // The stream's raw PCM format (16-bit little-endian) — needed to size the
+  // capture and to write the WAV header.
+  sampleRate: 48_000,
+  channels: 2,
+  defaultDurationS: 30,
+  timeoutMs: 3 * 60 * 1000,
 } as const;
 
 /** Builds the callback_url HeyGen posts webhook events to, carrying the per-job callback_token. */

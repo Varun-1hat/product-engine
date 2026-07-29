@@ -23,6 +23,9 @@ import type { KeyResolver } from "@/src/lib/crypto/vault";
 import { getAsset, upsertAssetVersion } from "@/src/lib/versioning";
 import type { Category, Provider, StageId } from "@/src/lib/db/enums";
 
+/** Cap on the linear per-attempt backoff used when re-arming a transiently-failed poll (N1). */
+const RECONCILE_RETRY_BACKOFF_CAP_MS = 5 * 60_000;
+
 interface AsyncGenJobPayload {
   call_type?: "generate" | "redo";
   provider?: string;
@@ -122,10 +125,28 @@ export async function reconcileJob(deps: {
     await jobs.complete(job.id, { asset_version_id: version.id });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Conservative default: unbilled unless we have positive confirmation
-    // of a billed attempt — none of the wave-1/2 adapters currently signal
-    // that distinctly (spec §4/§9 edge #13; a future enhancement could have
-    // adapters throw a typed error carrying `billed: true`).
+
+    // N1: on any caught error here (429/5xx from the provider, a Storage
+    // upload failure, a DB hiccup), treat it as TRANSIENT by default and
+    // re-arm for another poll rather than routing through jobs.fail()'s
+    // default retry, which moves the job to 'queued' — a status
+    // worker/index.ts's main claim loop treats as fatal for this job type
+    // ("reached the main claim loop unexpectedly"), since broll_gen/
+    // avatar_gen/outro_gen never pass through it. Deliberately do NOT log a
+    // failed_unbilled cost_log row under the generation's real
+    // idempotency_key here — that key is the double-charge guard for this
+    // generation's eventual real (billed or terminal-unbilled) outcome, and
+    // logging a row under it now would burn it before that outcome exists.
+    if (job.attempts < job.max_attempts) {
+      const backoffMs = Math.min(30_000 * (job.attempts + 1), RECONCILE_RETRY_BACKOFF_CAP_MS);
+      await jobs.retryLater(job.id, new Date(Date.now() + backoffMs), message);
+      return;
+    }
+
+    // Retries exhausted — this is a genuine terminal outcome now: log the
+    // (conservatively unbilled — none of the wave-1/2 adapters currently
+    // signal a distinct billed-on-failure case; spec §4/§9 edge #13) result
+    // under the real idempotency_key, and fail the job for good.
     await costEngine.log({
       reel_id: job.reel_id,
       client_id: clientId,
@@ -137,7 +158,7 @@ export async function reconcileJob(deps: {
       call_status: "failed_unbilled",
       idempotency_key: job.idempotency_key ?? undefined,
     });
-    await jobs.fail(job.id, message);
+    await jobs.fail(job.id, message, { retry: false });
   }
 }
 

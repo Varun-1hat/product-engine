@@ -13,9 +13,10 @@ import type { StageContext, StageModule, StageState } from "../types";
 import { nextStage } from "../types";
 import { PROVIDERS } from "@/src/lib/db/enums";
 import type { ReelConfigRow, SceneRow } from "@/src/lib/db/types";
-import { isDowngradedToHardCut, type SceneLike, type SupportsEndFrameLookup } from "@/src/lib/routing";
+import { isDowngradedToHardCut, supportsEndFrameLookupFor, type SceneLike, type SupportsEndFrameLookup } from "@/src/lib/routing";
 import type { AdapterRegistry } from "@/src/adapters/registry";
 import type { BrandContext } from "@/src/skills/types";
+import { SCENE_BRAIN_SYSTEM_PROMPT } from "@/src/skills/scene-brain";
 
 const sceneEntrySchema = z.object({
   id: z.string().uuid().optional(),
@@ -25,6 +26,7 @@ const sceneEntrySchema = z.object({
   seconds: z.number().positive(),
   transition_to_next: z.enum(["continuous", "hard_cut"]).nullable().optional(),
   broll_provider_override: z.enum(PROVIDERS).nullable().optional(),
+  end_frame_disabled: z.boolean().optional(),
   description: z.string().nullable().optional(),
 });
 
@@ -33,6 +35,12 @@ export const sceneInputSchema = z.object({
   regenerate: z.boolean().optional(),
   /** Full desired scene list (add/edit/reorder/delete by omission) — required unless regenerate=true. */
   scenes: z.array(sceneEntrySchema).optional(),
+  /**
+   * Per-reel scene-brain instruction, persisted before anything is
+   * generated — so it's editable up front and again on every re-run. Empty
+   * string resets to the built-in default.
+   */
+  scene_prompt: z.string().optional(),
 });
 export type SceneInput = z.infer<typeof sceneInputSchema>;
 
@@ -45,10 +53,6 @@ export interface SceneHint {
 export interface SceneOutput {
   scenes: SceneRow[];
   hints: SceneHint[];
-}
-
-function supportsEndFrameLookup(adapters: AdapterRegistry): SupportsEndFrameLookup {
-  return (provider) => adapters.tryGet("video_broll", provider)?.capabilities().supports_end_frame ?? false;
 }
 
 /** Pure: which boundaries are downgraded from the user's stored 'continuous' intent (§2.4). Exported for tests. */
@@ -111,17 +115,46 @@ async function load(ctx: StageContext): Promise<StageState> {
     .eq("reel_id", ctx.reelId)
     .order("position", { ascending: true });
   if (error) throw new Error(`scenes lookup failed: ${error.message}`);
-  return { stage: "scene", data: { scenes: (scenes ?? []) as SceneRow[] } };
+  // scene_prompt comes back resolved (stored override, else the built-in
+  // default) so the page can show and edit the real instruction — before the
+  // first generation as well as on a re-run.
+  const reelConfig = await getReelConfig(ctx);
+  return {
+    stage: "scene",
+    data: {
+      scenes: (scenes ?? []) as SceneRow[],
+      scene_prompt: reelConfig.scene_prompt ?? SCENE_BRAIN_SYSTEM_PROMPT,
+      scene_prompt_is_default: reelConfig.scene_prompt === null,
+    },
+  };
 }
 
 async function process(input: SceneInput, ctx: StageContext): Promise<SceneOutput> {
+  // Persist an edited instruction first, so the regenerate below (and every
+  // later re-run) uses it rather than the copy this request came in with.
+  if (input.scene_prompt !== undefined) {
+    const scenePrompt = input.scene_prompt.trim() === "" ? null : input.scene_prompt;
+    const { error } = await ctx.supa.from("reel_config").update({ scene_prompt: scenePrompt }).eq("reel_id", ctx.reelId);
+    if (error) throw new Error(`reel_config update (scene_prompt) failed: ${error.message}`);
+  }
+
   const reelConfig = await getReelConfig(ctx);
   const { brand, hasProducts } = await getBrandAndProducts(ctx);
+
+  // A prompt-only save must not fall through to the "no scenes supplied =>
+  // regenerate" path below: storing the instruction isn't a request to run it.
+  if (input.scene_prompt !== undefined && !input.regenerate && !input.scenes) {
+    const state = await load(ctx);
+    const current = (state.data as { scenes: SceneRow[] }).scenes;
+    return { scenes: current, hints: computeSceneHints(current, reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant)) };
+  }
 
   let desired = input.scenes;
   if (input.regenerate || !desired) {
     const generated = await ctx.skills.sceneBrain({
       topic: reelConfig.topic,
+      topic_description: reelConfig.topic_description,
+      system_prompt: reelConfig.scene_prompt,
       total_seconds_target: reelConfig.total_seconds_target,
       avatar_enabled: reelConfig.avatar_enabled,
       has_products: hasProducts,
@@ -155,6 +188,7 @@ async function process(input: SceneInput, ctx: StageContext): Promise<SceneOutpu
       seconds: scene.seconds,
       transition_to_next: scene.transition_to_next ?? null,
       broll_provider_override: scene.broll_provider_override ?? null,
+      end_frame_disabled: scene.end_frame_disabled ?? false,
       description: scene.description ?? null,
     };
     if (scene.id) {
@@ -169,7 +203,7 @@ async function process(input: SceneInput, ctx: StageContext): Promise<SceneOutpu
   }
 
   results.sort((a, b) => a.position - b.position);
-  const hints = computeSceneHints(results, reelConfig, supportsEndFrameLookup(ctx.adapters));
+  const hints = computeSceneHints(results, reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
 
   return { scenes: results, hints };
 }
