@@ -17,6 +17,14 @@
 .DS_Store
 *.pem
 
+# os / editor cruft
+Thumbs.db
+desktop.ini
+*~
+*.swp
+.idea/
+.vscode/
+
 # debug
 npm-debug.log*
 yarn-debug.log*
@@ -38,3 +46,10 @@ next-env.d.ts
 # supabase local
 supabase/.branches
 supabase/.temp
+
+# agent pipeline scratch (/ship stage output — regenerated each run)
+/.pipeline/
+
+# vendored third-party skills (reinstall: npx skills add supabase/agent-skills)
+# project-authored skills live in /skills and stay tracked
+/.claude/skills/
