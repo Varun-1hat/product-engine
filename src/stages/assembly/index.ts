@@ -14,6 +14,7 @@ import type { StageContext, StageModule, StageState } from "../types";
 import { getReelConfig, getScenesForReel } from "@/src/lib/rows";
 import { getAsset } from "@/src/lib/versioning";
 import { buildAssemblyPlan, type AssemblyMusicSource, type AssemblyPlan } from "./plan";
+import { enabledClipAudioPaths, OUTRO_KEY } from "@/src/lib/clipAudio";
 import { supportsEndFrameLookupFor } from "@/src/lib/routing";
 import type { AssetRow } from "@/src/lib/db/types";
 import { runJobInline } from "@/src/lib/jobs/run";
@@ -75,6 +76,10 @@ async function buildPlanForReel(ctx: StageContext): Promise<AssemblyPlan> {
     ? { storage_path: reelConfig.music_path, music_trim: reelConfig.music_trim }
     : null;
 
+  // Each clip's retained audio, already filtered by its on/off choice — the
+  // one place Stage 9 asks whether the user wanted a clip's sound.
+  const { [OUTRO_KEY]: outroAudioPath, ...clipAudioPaths } = await enabledClipAudioPaths(ctx);
+
   const outputPath = `${ctx.clientId}/${ctx.reelId}/assembly/${randomUUID()}.mp4`;
 
   return buildAssemblyPlan({
@@ -89,6 +94,8 @@ async function buildPlanForReel(ctx: StageContext): Promise<AssemblyPlan> {
     fps: reelConfig.output_fps,
     supportsEndFrame: supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant),
     music,
+    clipAudioPaths,
+    outroAudioPath: outroAudioPath ?? null,
     outputPath,
   });
 }

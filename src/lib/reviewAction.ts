@@ -16,6 +16,7 @@ export const reviewActionSchema = z.object({
     "redoAsset",
     "uploadAsset",
     "uploadNewAsset",
+    "setAudioEnabled",
     "revertPrompt",
     "revertAsset",
     "download",
@@ -28,6 +29,8 @@ export const reviewActionSchema = z.object({
   /** For 'uploadNewAsset': locates a not-yet-generated slot (no assetId exists yet). */
   sceneId: z.string().uuid().optional(),
   role: z.enum(["start", "end"]).optional(),
+  /** For 'setAudioEnabled': use this clip's audio in the final render. */
+  enabled: z.boolean().optional(),
   /** For 'download': an asset_versions.id (a specific version, not the asset). */
   assetVersionId: z.string().uuid().optional(),
   text: z.string().optional(),
@@ -59,6 +62,14 @@ export async function dispatchReviewAction(hooks: ReviewHooks, input: ReviewActi
       if (!input.storagePath) throw new Error("storagePath is required for uploadNewAsset");
       if (!hooks.uploadNewAsset) throw new Error("this stage does not support uploading an asset override");
       return { version: await hooks.uploadNewAsset({ sceneId: input.sceneId, role: input.role }, input.storagePath) };
+
+    case "setAudioEnabled":
+      if (!input.assetId || input.enabled === undefined) {
+        throw new Error("assetId and enabled are required for setAudioEnabled");
+      }
+      if (!hooks.setAudioEnabled) throw new Error("this stage has no toggleable audio");
+      await hooks.setAudioEnabled(input.assetId, input.enabled);
+      return { ok: true };
 
     case "revertPrompt":
       if (!input.promptId || input.versionNo === undefined) {

@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/app/components/ui/ca
 import { Badge } from "@/app/components/ui/badge";
 import { Slider } from "@/app/components/ui/slider";
 import { AssetReview, type AssetReviewProps } from "@/app/components/AssetReview";
+import { ClipAudioPanel, useClipAudio } from "@/app/components/ClipAudioPanel";
 import { useApiResource } from "@/app/hooks/useApiResource";
 import type { ReelConfigRow } from "@/src/lib/db/types";
 
@@ -43,8 +44,9 @@ interface TrimStateResponse {
   slots: Record<string, TrimSlotDetail | undefined>;
 }
 
-/** Minimal projection of `GET /api/reels/{reelId}` (spec §4 pattern) — only the aspect ratio is needed here. */
+/** Minimal projection of `GET /api/reels/{reelId}` (spec §4 pattern) — aspect ratio, plus client_id for audio uploads. */
 interface ReelDetailResponse {
+  reel: { client_id: string };
   reel_config: ReelConfigRow;
 }
 
@@ -75,11 +77,20 @@ export default function TrimStagePage({ params }: { params: Promise<{ reelId: st
   // Reel's aspect ratio (spec §4 pattern) — same independent second fetch image/page.tsx uses.
   const { data: reelDetail } = useApiResource<ReelDetailResponse>(`/api/reels/${reelId}`);
   const aspectRatio = reelDetail?.reel_config.aspect_ratio as AssetReviewProps["aspectRatio"];
+  const clientId = reelDetail?.reel.client_id ?? null;
+
+  const { clips: clipAudio, reloadClipAudio } = useClipAudio(reelId);
+  const audioByKey = new Map((clipAudio ?? []).map((c) => [c.key, c]));
 
   // Per-scene, not-yet-submitted start_s/end_s selection; cleared back to the
   // full current range once a trim for that scene succeeds (see handleTrim).
   const [trimRange, setTrimRange] = useState<Record<string, [number, number]>>({});
+  const [audioTrimRange, setAudioTrimRange] = useState<Record<string, [number, number]>>({});
+  // Cutting picture and sound to the same range is the common case, so it is
+  // the default; unlinking gives each its own range and its own Trim button.
+  const [unlinkedAudio, setUnlinkedAudio] = useState<Record<string, boolean>>({});
   const [savingSceneId, setSavingSceneId] = useState<string | null>(null);
+  const [savingAudioSceneId, setSavingAudioSceneId] = useState<string | null>(null);
   const [reordering, setReordering] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -98,31 +109,67 @@ export default function TrimStagePage({ params }: { params: Promise<{ reelId: st
     hintsByScene.set(hint.scene_id, list);
   }
 
+  async function reloadBoth() {
+    await reload();
+    await reloadClipAudio();
+  }
+
   function rangeFor(sceneId: string, durationS: number): [number, number] {
     return trimRange[sceneId] ?? [0, durationS];
   }
 
-  async function handleTrim(sceneId: string, assetId: string, range: [number, number]) {
+  function audioRangeFor(sceneId: string, durationS: number): [number, number] {
+    return audioTrimRange[sceneId] ?? [0, durationS];
+  }
+
+  /** One trim job against one asset — the stage endpoint is already asset-keyed, so audio needs no separate route. */
+  async function postTrim(assetId: string, range: [number, number]) {
+    const res = await fetch(`/api/reels/${reelId}/trim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ asset_id: assetId, start_s: range[0], end_s: range[1] }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? "trim failed");
+  }
+
+  /** `audioAssetId` present = "trim together": the same range is applied to both lanes. */
+  async function handleTrim(sceneId: string, assetId: string, range: [number, number], audioAssetId?: string | null) {
     setSavingSceneId(sceneId);
     setActionError(null);
     try {
-      const res = await fetch(`/api/reels/${reelId}/trim`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ asset_id: assetId, start_s: range[0], end_s: range[1] }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "trim failed");
+      await postTrim(assetId, range);
+      if (audioAssetId) await postTrim(audioAssetId, range);
       setTrimRange((prev) => {
         const next = { ...prev };
         delete next[sceneId];
         return next;
       });
       await reload();
+      await reloadClipAudio();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingSceneId(null);
+    }
+  }
+
+  /** Audio cut on its own range, leaving the picture untouched. */
+  async function handleAudioTrim(sceneId: string, audioAssetId: string, range: [number, number]) {
+    setSavingAudioSceneId(sceneId);
+    setActionError(null);
+    try {
+      await postTrim(audioAssetId, range);
+      setAudioTrimRange((prev) => {
+        const next = { ...prev };
+        delete next[sceneId];
+        return next;
+      });
+      await reloadClipAudio();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingAudioSceneId(null);
     }
   }
 
@@ -159,6 +206,8 @@ export default function TrimStagePage({ params }: { params: Promise<{ reelId: st
       {scenes.map((scene, index) => {
         const slot = state.slots[scene.id];
         const hints = hintsByScene.get(scene.id) ?? [];
+        const audio = audioByKey.get(scene.id) ?? null;
+        const unlinked = unlinkedAudio[scene.id] ?? false;
 
         return (
           <Card key={scene.id}>
@@ -213,15 +262,47 @@ export default function TrimStagePage({ params }: { params: Promise<{ reelId: st
 
                   {slot.duration_s != null ? (
                     <TrimControls
+                      label={audio?.asset_id && !unlinked ? "Trim range (picture + sound)" : "Trim range"}
                       durationS={slot.duration_s}
                       range={rangeFor(scene.id, slot.duration_s)}
                       onChange={(range) => setTrimRange((prev) => ({ ...prev, [scene.id]: range }))}
-                      onSubmit={(range) => handleTrim(scene.id, slot.asset_id, range)}
+                      onSubmit={(range) =>
+                        handleTrim(scene.id, slot.asset_id, range, !unlinked ? audio?.asset_id : null)
+                      }
                       saving={savingSceneId === scene.id}
                     />
                   ) : (
                     <p className="text-xs text-muted-foreground">clip duration unknown — nothing to trim yet</p>
                   )}
+
+                  {audio ? (
+                    <ClipAudioPanel reelId={reelId} clientId={clientId} clip={audio} onChanged={reloadBoth}>
+                      {audio.asset_id ? (
+                        <div className="flex flex-col gap-2">
+                          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <input
+                              type="checkbox"
+                              checked={unlinked}
+                              onChange={(e) =>
+                                setUnlinkedAudio((prev) => ({ ...prev, [scene.id]: e.target.checked }))
+                              }
+                            />
+                            Trim the sound separately from the picture
+                          </label>
+                          {unlinked && audio.duration_s != null ? (
+                            <TrimControls
+                              label="Audio trim range"
+                              durationS={audio.duration_s}
+                              range={audioRangeFor(scene.id, audio.duration_s)}
+                              onChange={(range) => setAudioTrimRange((prev) => ({ ...prev, [scene.id]: range }))}
+                              onSubmit={(range) => handleAudioTrim(scene.id, audio.asset_id!, range)}
+                              saving={savingAudioSceneId === scene.id}
+                            />
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </ClipAudioPanel>
+                  ) : null}
                 </>
               ) : (
                 <p className="text-xs text-muted-foreground">clip not generated yet — visit the Clip stage first</p>
@@ -235,12 +316,15 @@ export default function TrimStagePage({ params }: { params: Promise<{ reelId: st
 }
 
 function TrimControls({
+  label = "Trim range",
   durationS,
   range,
   onChange,
   onSubmit,
   saving,
 }: {
+  /** Names what this range cuts — picture and sound together, or one of them alone. */
+  label?: string;
   durationS: number;
   range: [number, number];
   onChange: (range: [number, number]) => void;
@@ -253,7 +337,7 @@ function TrimControls({
   return (
     <div className="flex flex-col gap-2 rounded-md border border-border p-3">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>Trim range</span>
+        <span>{label}</span>
         <span className="font-mono">
           {start.toFixed(1)}s – {end.toFixed(1)}s of {durationS.toFixed(1)}s
         </span>

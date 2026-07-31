@@ -126,6 +126,8 @@ export interface AssetRow {
   media_type: MediaType;
   current_version_id: string | null;
   shared: boolean;
+  /** Only meaningful for `clip_audio` rows (like `shared` for boundary frames): use this clip's audio in the render. */
+  audio_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -141,6 +143,8 @@ export interface AssetVersionMetadata {
   mime?: string;
   trim?: { start_s: number; end_s: number };
   base_version_id?: string;
+  /** `clip_audio` only: the clip asset this track was demuxed out of, so a clip redo can supersede it. */
+  source_clip_asset_id?: string;
 }
 
 export interface AssetVersion {

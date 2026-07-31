@@ -6,7 +6,7 @@ import { useFileUpload } from "@/app/hooks/useFileUpload";
 export interface UploadSlotProps {
   /** The stage's review endpoint, e.g. `/api/reels/{reelId}/image/review`. */
   reviewEndpoint: string;
-  mediaType: "image" | "video";
+  mediaType: "image" | "video" | "audio";
   clientId?: string | null;
   reelId: string;
   /** Locates the slot for the stage's `uploadNewAsset` hook. */

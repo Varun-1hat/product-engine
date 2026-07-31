@@ -4,8 +4,9 @@
  * src/stages/assembly/plan.ts AssemblyPlan with real ffmpeg commands:
  * strip audio + normalize every clip (resolution/aspect/fps/yuv420p/
  * H.264), drop 1 head frame on continuous-seam incoming clips, concat,
- * build the music bed (trim/loop/fade), mux to mp4 (H.264+AAC) -> renders/
- * -> a new final_render asset_version. Re-assembly reuses the same
+ * build the two audio lanes (the clips' own retained audio, and the music
+ * bed trimmed/looped/faded) and mix them, mux to mp4 (H.264+AAC) ->
+ * renders/ -> a new final_render asset_version. Re-assembly reuses the same
  * final_render asset (new version, same row) and re-sets
  * `reels.status='assembled'`.
  */
@@ -139,7 +140,104 @@ export async function buildMusicTrack(
   return outputPath;
 }
 
-/** mp4, H.264 + AAC (§7 Stage 9.6) — video-only (no audio stream) when there's no music bed at all. */
+/** The mix format every audio segment is normalized to before concat. */
+const MIX_SAMPLE_RATE = 48_000;
+const MIX_CHANNELS = 2;
+
+/**
+ * One clip's contribution to the audio lane, as a wav of *exactly*
+ * `durationS`. `apad` pads a short track with silence and `-t` truncates a
+ * long one, so a track trimmed independently of its picture — shorter or
+ * longer — still occupies precisely its own clip's slot and everything after
+ * it stays in sync.
+ */
+async function buildClipAudioSegment(
+  inputPath: string | null,
+  outputPath: string,
+  durationS: number
+): Promise<void> {
+  await runFfmpeg((cmd) => {
+    if (inputPath) {
+      cmd.input(inputPath).audioFilters("apad");
+    } else {
+      cmd.input(`anullsrc=r=${MIX_SAMPLE_RATE}:cl=stereo`).inputOptions(["-f", "lavfi"]);
+    }
+    cmd
+      .duration(Math.max(0.01, durationS))
+      .audioChannels(MIX_CHANNELS)
+      .audioFrequency(MIX_SAMPLE_RATE)
+      .audioCodec("pcm_s16le")
+      .noVideo();
+  }, outputPath);
+}
+
+/**
+ * The clips' own audio, laid end to end against the *normalized* clip
+ * durations (`clipDurationsS`) rather than the plan's scene metadata. That
+ * distinction matters: a continuous seam drops a frame off the incoming clip,
+ * so metadata lengths would drift the audio a frame per seam.
+ *
+ * Returns null when no clip has enabled audio — the caller then treats the
+ * music bed as the only lane, exactly as before this existed.
+ */
+export async function buildClipAudioLane(
+  plan: AssemblyPlan,
+  clipDurationsS: number[],
+  dir: string,
+  loadAudio: (storagePath: string, index: number) => Promise<string>
+): Promise<string | null> {
+  if (!plan.clips.some((clip) => clip.audio_storage_path)) return null;
+
+  const segmentPaths: string[] = [];
+  for (let i = 0; i < plan.clips.length; i++) {
+    const clip = plan.clips[i];
+    const inputPath = clip.audio_storage_path ? await loadAudio(clip.audio_storage_path, i) : null;
+    const segmentPath = path.join(dir, `clip_audio_${i}.wav`);
+    await buildClipAudioSegment(inputPath, segmentPath, clipDurationsS[i]);
+    segmentPaths.push(segmentPath);
+  }
+
+  const lanePath = path.join(dir, "clip_audio_lane.m4a");
+  const listPath = path.join(dir, "clip_audio_list.txt");
+  await writeFile(listPath, segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n"), "utf-8");
+  await runFfmpeg((cmd) => {
+    cmd.input(listPath).inputOptions(["-f", "concat", "-safe", "0"]).audioCodec("aac");
+  }, lanePath);
+
+  return lanePath;
+}
+
+/**
+ * Clip audio + music bed into one track. The bed is attenuated to
+ * `musicVolume` first so it sits under the clips rather than fighting them.
+ *
+ * `amix` attenuates each input by 1/n, so the `volume=2` afterwards restores
+ * unity for the two-input case — the same result as `normalize=0` without
+ * depending on an ffmpeg new enough to have that option.
+ */
+export async function mixAudioLanes(
+  clipLanePath: string,
+  musicPath: string,
+  musicVolume: number,
+  outputPath: string
+): Promise<void> {
+  await runFfmpeg((cmd) => {
+    cmd
+      .input(clipLanePath)
+      .input(musicPath)
+      .complexFilter(
+        [
+          `[1:a]volume=${musicVolume}[bed]`,
+          "[0:a][bed]amix=inputs=2:duration=first:dropout_transition=0[mixed]",
+          "[mixed]volume=2[out]",
+        ],
+        "out"
+      )
+      .audioCodec("aac");
+  }, outputPath);
+}
+
+/** mp4, H.264 + AAC (§7 Stage 9.6) — video-only (no audio stream) when neither audio lane exists. */
 export async function muxFinal(videoPath: string, audioPath: string | null, outputPath: string): Promise<void> {
   await runFfmpeg((cmd) => {
     cmd.input(videoPath);
@@ -164,7 +262,14 @@ export async function runAssemblyJob(supa: ServiceClient, storage: StorageClient
   const { width, height } = dimensionsFor(plan.aspect_ratio, plan.resolution);
 
   await withTempDir(async (dir) => {
+    // Only reels that actually carry clip audio pay for the per-clip probe below.
+    const hasClipAudio = plan.clips.some((clip) => clip.audio_storage_path);
+
     const normalizedPaths: string[] = [];
+    // Real post-normalize length of each clip (the seam trim shortens some of
+    // them) — the clip-audio lane is laid out against these, not the plan's
+    // scene metadata, so the sound cannot drift away from the picture.
+    const normalizedDurationsS: number[] = [];
     for (let i = 0; i < plan.clips.length; i++) {
       const clip = plan.clips[i];
       const inputBuffer = await storage.download("assets", clip.storage_path);
@@ -172,19 +277,36 @@ export async function runAssemblyJob(supa: ServiceClient, storage: StorageClient
       const outputPath = path.join(dir, `clip_${i}_norm.mp4`);
       await normalizeClip(inputPath, outputPath, width, height, plan.fps, clip.trim_head_frame);
       normalizedPaths.push(outputPath);
+      // `|| clip.duration_s`: probeDurationS reads ffmpeg's stream header and
+      // can come back 0, which would shrink this clip's audio to nothing and
+      // pull every later clip out of sync.
+      if (hasClipAudio) normalizedDurationsS.push((await probeDurationS(outputPath)) || clip.duration_s);
     }
 
     const concatenatedPath = path.join(dir, "concatenated.mp4");
     await concatClips(normalizedPaths, dir, concatenatedPath);
 
-    let audioPath: string | null = null;
+    const clipLanePath = await buildClipAudioLane(plan, normalizedDurationsS, dir, async (storagePath, index) => {
+      const buffer = await storage.download("assets", storagePath);
+      return writeTempFile(dir, `clip_audio_${index}_in`, buffer);
+    });
+
+    let musicLanePath: string | null = null;
     if (plan.music) {
       const musicBuffer = await storage.download("music", plan.music.storage_path);
       const musicInputPath = await writeTempFile(dir, "music_in", musicBuffer);
       // Cover the video that actually came out of concat — plan.total_duration_s is
       // scene-metadata math and can be well short of the real clip lengths.
       const videoDurationS = await probeDurationS(concatenatedPath);
-      audioPath = await buildMusicTrack(musicInputPath, dir, plan.music, videoDurationS || plan.total_duration_s);
+      musicLanePath = await buildMusicTrack(musicInputPath, dir, plan.music, videoDurationS || plan.total_duration_s);
+    }
+
+    // Both lanes play together; either alone is used as-is; neither leaves the
+    // render silent, exactly as before clip audio existed.
+    let audioPath: string | null = clipLanePath ?? musicLanePath;
+    if (clipLanePath && musicLanePath) {
+      audioPath = path.join(dir, "audio_mixed.m4a");
+      await mixAudioLanes(clipLanePath, musicLanePath, plan.music?.volume ?? 1, audioPath);
     }
 
     const finalPath = path.join(dir, "final.mp4");

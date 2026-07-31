@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAssemblyPlan, type SceneLike } from "./plan";
+import { buildAssemblyPlan, MUSIC_VOLUME_UNDER_CLIP_AUDIO, type SceneLike } from "./plan";
 
 const supportsEndFrame = (provider: string) => provider === "veo";
 
@@ -228,6 +228,73 @@ describe("buildAssemblyPlan", () => {
         music: { storage_path: "music/track.mp3", music_trim: { start_s: 0, end_s: 30 } },
       });
       expect(plan.music?.fade_in_s).toBe(3);
+    });
+  });
+
+  describe("clip audio", () => {
+    const scenes = [scene({ id: "a", position: 0 }), scene({ id: "b", position: 1 })];
+    const baseParams = {
+      scenesByPosition: scenes,
+      clipStoragePaths: { a: "a.mp4", b: "b.mp4" },
+      sceneDurations: { a: 4, b: 4 },
+      outroClipStoragePath: "outro.mp4",
+      outroSeconds: 2,
+      reelConfig: { broll_provider: "veo", outro_provider_override: null },
+      aspectRatio: "9:16",
+      resolution: "1080p",
+      fps: 30,
+      supportsEndFrame,
+      outputPath: "renders/final.mp4",
+    };
+
+    it("carries each clip's audio through by scene, and the outro's separately", () => {
+      const plan = buildAssemblyPlan({
+        ...baseParams,
+        music: null,
+        clipAudioPaths: { a: "a-audio.m4a", b: "b-audio.m4a" },
+        outroAudioPath: "outro-audio.m4a",
+      });
+
+      const byScene = Object.fromEntries(plan.clips.map((c) => [c.scene_id ?? "outro", c.audio_storage_path]));
+      expect(byScene).toEqual({ a: "a-audio.m4a", b: "b-audio.m4a", outro: "outro-audio.m4a" });
+    });
+
+    it("leaves a clip silent when it has no audio — a switched-off clip is simply absent from the map", () => {
+      const plan = buildAssemblyPlan({
+        ...baseParams,
+        music: null,
+        clipAudioPaths: { a: "a-audio.m4a" }, // b muted by the user, outro never had any
+      });
+
+      const byScene = Object.fromEntries(plan.clips.map((c) => [c.scene_id ?? "outro", c.audio_storage_path]));
+      expect(byScene).toEqual({ a: "a-audio.m4a", b: null, outro: null });
+    });
+
+    it("ducks the music bed under the clips' audio when any clip has some", () => {
+      const plan = buildAssemblyPlan({
+        ...baseParams,
+        music: { storage_path: "music/track.mp3", music_trim: { start_s: 0, end_s: 30 } },
+        clipAudioPaths: { b: "b-audio.m4a" },
+      });
+      expect(plan.music?.volume).toBe(MUSIC_VOLUME_UNDER_CLIP_AUDIO);
+    });
+
+    it("keeps the music bed at full level when nothing else is playing", () => {
+      const plan = buildAssemblyPlan({
+        ...baseParams,
+        music: { storage_path: "music/track.mp3", music_trim: { start_s: 0, end_s: 30 } },
+        clipAudioPaths: {},
+      });
+      expect(plan.music?.volume).toBe(1);
+    });
+
+    it("defaults every clip to silent when no audio is passed at all (pre-clip-audio reels)", () => {
+      const plan = buildAssemblyPlan({
+        ...baseParams,
+        music: { storage_path: "music/track.mp3", music_trim: { start_s: 0, end_s: 30 } },
+      });
+      expect(plan.clips.every((c) => c.audio_storage_path === null)).toBe(true);
+      expect(plan.music?.volume).toBe(1);
     });
   });
 });

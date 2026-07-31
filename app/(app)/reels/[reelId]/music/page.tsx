@@ -7,6 +7,7 @@ import { Textarea } from "@/app/components/ui/textarea";
 import { Label } from "@/app/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/app/components/ui/card";
+import { ClipAudioPanel, useClipAudio } from "@/app/components/ClipAudioPanel";
 import { useApiResource } from "@/app/hooks/useApiResource";
 import { useFileUpload } from "@/app/hooks/useFileUpload";
 import type { Reel, ReelConfigRow } from "@/src/lib/db/types";
@@ -48,6 +49,14 @@ interface ReelDetailResponse {
  * `loadedmetadata` event (`duration` isn't known up front, unlike a Slider's
  * fixed min/max), so plain number inputs that clamp against the now-known
  * duration are used instead of a Slider, per spec.
+ *
+ * Two lengths of audio live here. The card above is the reel-length
+ * background bed. The card below is the same models generating clip by clip,
+ * writing into each clip's own audio slot beside whatever the video model
+ * produced — so this page is where the whole soundtrack is settled: bed
+ * underneath, per-clip audio on top, each clip switchable on or off. It is
+ * also the one stage that lists the outro clip, which Clip and Trim don't
+ * show.
  */
 export default function MusicStagePage({ params }: { params: Promise<{ reelId: string }> }) {
   const { reelId } = usePromise(params);
@@ -66,6 +75,11 @@ export default function MusicStagePage({ params }: { params: Promise<{ reelId: s
   const [provider, setProvider] = useState<MusicProvider>("elevenlabs");
   const [generating, setGenerating] = useState(false);
   const [drafting, setDrafting] = useState(false);
+  // Clip-wise generation: per-clip prompt overrides (blank = use the reel
+  // prompt above) and which clip is currently generating.
+  const { clips: clipAudio, reloadClipAudio } = useClipAudio(reelId);
+  const [clipPrompts, setClipPrompts] = useState<Record<string, string>>({});
+  const [generatingClipKey, setGeneratingClipKey] = useState<string | null>(null);
   // Session-only: "leave as is" writes nothing, so the mismatch re-surfaces on
   // reload until the prompt or the selected model actually changes.
   const [stalenessDismissed, setStalenessDismissed] = useState(false);
@@ -183,6 +197,31 @@ export default function MusicStagePage({ params }: { params: Promise<{ reelId: s
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setGenerating(false);
+    }
+  }
+
+  /**
+   * Same models, same prompt, one clip's length instead of the reel's. The
+   * track lands as a new version of that clip's audio slot, so the model's
+   * own audio stays in its history and either can be restored.
+   */
+  async function handleGenerateForClip(clipKey: string) {
+    setGeneratingClipKey(clipKey);
+    setActionError(null);
+    try {
+      const clipPrompt = clipPrompts[clipKey]?.trim() || prompt;
+      const res = await fetch(`/api/reels/${reelId}/music/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: clipPrompt, provider, target_clip: clipKey }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? "generate failed");
+      await reloadClipAudio();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGeneratingClipKey(null);
     }
   }
 
@@ -362,13 +401,57 @@ export default function MusicStagePage({ params }: { params: Promise<{ reelId: s
           ) : null}
 
           <p className="text-xs text-muted-foreground">
-            Fade-in/out and looping to fill the reel&apos;s length are applied automatically during assembly.
+            Fade-in/out and looping to fill the reel&apos;s length are applied automatically during assembly. This
+            track plays underneath any clip audio you keep, not instead of it.
           </p>
 
           {actionError ? <span className="text-xs text-destructive">{actionError}</span> : null}
           {uploadError ? <span className="text-xs text-destructive">{uploadError}</span> : null}
         </CardContent>
       </Card>
+
+      {clipAudio && clipAudio.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Clip audio</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-5">
+            <p className="text-xs text-muted-foreground">
+              Each clip&apos;s own audio — what the video model produced, or your own upload, or a track generated
+              here for that clip alone. Switch any of them off to leave that clip carried by the background music.
+            </p>
+
+            {clipAudio.map((clip) => (
+              <div key={clip.key} className="flex flex-col gap-2">
+                <span className="text-sm font-medium">{clip.label}</span>
+                <ClipAudioPanel reelId={reelId} clientId={clientId} clip={clip} onChanged={reloadClipAudio}>
+                  <div className="flex flex-col gap-1">
+                    <Label htmlFor={`clip-prompt-${clip.key}`} className="text-xs text-muted-foreground">
+                      Generate for this clip {clip.clip_duration_s != null ? `(${clip.clip_duration_s.toFixed(1)}s)` : ""}
+                    </Label>
+                    <div className="flex flex-wrap items-end gap-2">
+                      <Input
+                        id={`clip-prompt-${clip.key}`}
+                        value={clipPrompts[clip.key] ?? ""}
+                        onChange={(e) => setClipPrompts((prev) => ({ ...prev, [clip.key]: e.target.value }))}
+                        placeholder={prompt || "e.g. a single warm swell under the reveal"}
+                        className="min-w-48 flex-1"
+                      />
+                      <Button
+                        variant="outline"
+                        onClick={() => handleGenerateForClip(clip.key)}
+                        disabled={generatingClipKey !== null || generating}
+                      >
+                        {generatingClipKey === clip.key ? "Generating…" : "Generate"}
+                      </Button>
+                    </div>
+                  </div>
+                </ClipAudioPanel>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
     </main>
   );
 }

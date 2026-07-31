@@ -18,6 +18,7 @@ import {
 import { PromptReview } from "@/app/components/PromptReview";
 import { AssetReview, type AssetReviewProps } from "@/app/components/AssetReview";
 import { UploadSlot } from "@/app/components/UploadSlot";
+import { ClipAudioPanel, useClipAudio } from "@/app/components/ClipAudioPanel";
 import { CostEstimateBar, type EstimateLine } from "@/app/components/CostEstimateBar";
 import { useApiResource } from "@/app/hooks/useApiResource";
 import type { Reel, ReelConfigRow, SceneRow } from "@/src/lib/db/types";
@@ -126,10 +127,16 @@ export default function ClipStagePage({ params }: { params: Promise<{ reelId: st
   const { data: clientDetail } = useApiResource<ClientDetailResponse>(clientId ? `/api/clients/${clientId}` : null);
   const avatarName = clientDetail?.avatars.find((a) => a.id === avatarLookId)?.name ?? null;
 
+  // Each clip's retained model audio (spec: reviewable here, in Trim and in
+  // Music, off the one shared endpoint so the on/off choice can't diverge).
+  const { clips: clipAudio, reloadClipAudio } = useClipAudio(reelId);
+  const audioByKey = new Map((clipAudio ?? []).map((c) => [c.key, c]));
+
   async function load() {
     const res = await fetch(`/api/reels/${reelId}/clip`);
     const data = await res.json();
     if (res.ok) setState(data);
+    await reloadClipAudio();
   }
 
   useEffect(() => {
@@ -230,20 +237,30 @@ export default function ClipStagePage({ params }: { params: Promise<{ reelId: st
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
               {slot ? (
-                <AssetReview
-                  reviewEndpoint={reviewEndpoint}
-                  assetId={slot.asset_id}
-                  mediaType={slot.media_type}
-                  previewUrl={slot.preview_url}
-                  currentVersionId={slot.current_version_id}
-                  currentVersionNo={slot.current_version_no}
-                  history={slot.history}
-                  aspectRatio={aspectRatio}
-                  costUsd={costUsd}
-                  clientId={clientId}
-                  reelId={reelId}
-                  onChanged={load}
-                />
+                <>
+                  <AssetReview
+                    reviewEndpoint={reviewEndpoint}
+                    assetId={slot.asset_id}
+                    mediaType={slot.media_type}
+                    previewUrl={slot.preview_url}
+                    currentVersionId={slot.current_version_id}
+                    currentVersionNo={slot.current_version_no}
+                    history={slot.history}
+                    aspectRatio={aspectRatio}
+                    costUsd={costUsd}
+                    clientId={clientId}
+                    reelId={reelId}
+                    onChanged={load}
+                  />
+                  {audioByKey.has(scene.id) ? (
+                    <ClipAudioPanel
+                      reelId={reelId}
+                      clientId={clientId}
+                      clip={audioByKey.get(scene.id)!}
+                      onChanged={load}
+                    />
+                  ) : null}
+                </>
               ) : (
                 <>
                   <div className="text-xs text-muted-foreground">clip not generated yet</div>

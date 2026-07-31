@@ -28,7 +28,7 @@ const VEO_31_CORE = [
   "Use real film vocabulary — Veo is trained on it. Camera movement: dolly shot, tracking shot, crane shot, aerial view, slow pan, POV shot. Composition: wide shot, close-up, extreme close-up, low angle, two-shot. Lens/focus: shallow depth of field, wide-angle lens, soft focus, macro lens, deep focus.",
   "ONE camera move per clip. These clips are 4-8s — a second move reads as a jump cut and degrades motion coherence.",
   "PHRASE EVERYTHING POSITIVELY. Never write 'no X' or 'don't X' in the prompt body; describe the desired state instead ('a desolate landscape with no buildings' -> 'an empty windswept plain of bare rock').",
-  "SILENT PIPELINE: Veo 3.1 generates native audio but this build strips it at assembly. Do NOT write dialogue, quoted speech, 'SFX:' lines, ambient-noise direction, or music cues — they consume prompt budget, pull the model toward talking-head framing, and are discarded.",
+  "AUDIO IS KEPT: Veo 3.1 generates native audio and this build retains it as the clip's own track, which the user can then keep, mute, replace or mix under the reel's music. So DO direct the ambience and specific sound effects that belong to the shot ('SFX: a single crisp click as the lid closes', 'ambient: quiet room tone, distant traffic') — brief and concrete, one or two cues at most. Still NO dialogue, quoted speech or voiceover: there is no script in this pipeline, and asking for speech pulls the model toward talking-head framing.",
   "Do NOT use timestamp blocks ([00:00-00:02] ...). Those are for multi-shot single generations; one scene here is one continuous shot.",
   "Do NOT write aspect-ratio, resolution, or duration tokens in the text — they are separate API fields.",
 ].join("\n");
@@ -73,7 +73,7 @@ const OMNI = [
   "Because length is not controllable, FRONT-LOAD the motion: the essential movement must read in the first ~2 seconds, since the tail may be trimmed away. Keep it to one simple, continuous camera move.",
   "Because it is 720p, avoid prompting for fine texture detail or tiny on-frame text — it will not resolve. Favour bold shapes, strong silhouettes and clear contrast.",
   "Prefer positive phrasing, but note this model is the EXCEPTION to the pipeline's positive-only rule: Google document that negative prompts are unsupported as a field and that you should 'put your negatives in the regular prompt: e.g., \"Do not do X\"'. Use that sparingly, for a specific artefact you actually need suppressed.",
-  "SILENT PIPELINE: no dialogue, no 'SFX:' lines, no ambient-audio or music direction.",
+  "AUDIO IS KEPT: this model's native audio is retained as the clip's own track, so brief ambience/SFX direction is worthwhile. No dialogue, quoted speech or voiceover — there is no script in this pipeline.",
   "This model has NO negativePrompt field — never emit a trailing 'Negative:' line (it would be rendered as visible prompt body). Put the negation inline instead, per the line above.",
 ].join("\n");
 
@@ -205,9 +205,9 @@ function veo31Constraints(variant: Exclude<VeoVariant, "omni">, ctx: ReelModelCo
   }
 
   items.push({
-    label: "Audio is always generated",
+    label: "Audio is always generated — and kept",
     detail:
-      "this model produces native audio and it cannot be turned off. Assembly strips it, so any dialogue, SFX or music direction in the prompt is paid for and discarded.",
+      "this model produces native audio and it cannot be turned off. It is retained as the clip's own track, so ambience and SFX direction is worth writing; the clip's audio can be switched off, replaced or trimmed later, and plays over the reel's music bed.",
     severity: "quality",
   });
 
@@ -256,8 +256,9 @@ function omniConstraints(ctx: ReelModelContext): ModelConstraints {
         severity: "quality",
       },
       {
-        label: "Audio is always generated",
-        detail: "native audio is produced and stripped at assembly — audio direction in the prompt is wasted budget.",
+        label: "Audio is always generated — and kept",
+        detail:
+          "native audio is produced and retained as the clip's own track, so brief ambience/SFX direction is worth writing. It can be switched off, replaced or trimmed later.",
         severity: "quality",
       },
     ],

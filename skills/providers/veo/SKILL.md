@@ -43,7 +43,7 @@ const video = op.response.generatedVideos[0].video;   // download via ai.files.d
 - `min_duration_s`/`max_duration_s`: Veo produces ~**8s** clips (verify whether 3.1 accepts a 4/6/8 `durationSeconds`; default to 8). Requesting a shorter scene ⇒ generate at model duration, **trim in Stage 6**.
 - `max_reference_images`: up to 3 (plus first/last frame).
 - `async: true` (long-running op). Prefer the Postgres `jobs` queue + worker poll; no Veo webhook, so poll `getVideosOperation`. Result URI is short-lived (~2 days) → **download to Storage immediately**.
-- **Native audio:** Veo 3.1 generates audio. This build is silent → **strip audio** (`-an`) when normalizing/at assembly.
+- **Native audio:** Veo 3.1 generates audio. This build **keeps** it: the track is demuxed into the clip's own `clip_audio` asset, which the user can switch off, replace or trim, and which is mixed over the music bed at assembly. The picture lane is still normalized with `-an` — the audio rejoins it as a separate lane, so the continuous-seam head-frame trim can't drag the sound out of sync.
 
 ## Continuity routing rule (deterministic)
 A b-roll boundary N→N+1 may be `continuous` (shared end/start frame) **only if scene N's effective b-roll model has `supports_end_frame=true`**. Veo satisfies this. If scene N's model lacks it, the boundary is forced to `hard_cut`. The outro clip needs `supports_end_frame` too (last-scene end frame → branded end frame); if the outro model lacks it, fall back to a deterministic crossfade-to-endframe.

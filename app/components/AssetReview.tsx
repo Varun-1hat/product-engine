@@ -45,6 +45,8 @@ export interface AssetReviewProps {
    */
   clientId?: string | null;
   reelId?: string;
+  /** Overrides the "Redo" label where regenerating means something more specific than "generate it again". */
+  redoLabel?: string;
   onChanged?: () => void;
 }
 
@@ -79,6 +81,7 @@ export function AssetReview({
   costUsd,
   clientId,
   reelId,
+  redoLabel = "Redo",
   onChanged,
 }: AssetReviewProps) {
   const [busy, setBusy] = useState(false);
@@ -137,7 +140,13 @@ export function AssetReview({
         ) : null}
       </div>
 
-      <div className={cn("flex items-center justify-center overflow-hidden rounded-md bg-muted", ASPECT_RATIO_CLASS[aspectRatio])}>
+      {/* Audio has no picture to frame — an aspect-ratio box would be a large empty rectangle around a thin player. */}
+      <div
+        className={cn(
+          "flex items-center justify-center overflow-hidden rounded-md bg-muted",
+          mediaType === "audio" ? "p-3" : ASPECT_RATIO_CLASS[aspectRatio]
+        )}
+      >
         {previewUrl ? (
           mediaType === "image" ? (
             // eslint-disable-next-line @next/next/no-img-element -- signed Storage URL, not a static asset
@@ -157,7 +166,7 @@ export function AssetReview({
           <AlertDialog>
             <AlertDialogTrigger asChild>
               <Button size="sm" disabled={busy}>
-                {busy ? "Redoing…" : `Redo · $${costUsd.toFixed(2)}`}
+                {busy ? "Redoing…" : `${redoLabel} · $${costUsd.toFixed(2)}`}
               </Button>
             </AlertDialogTrigger>
             <AlertDialogContent>
@@ -175,7 +184,7 @@ export function AssetReview({
           </AlertDialog>
         ) : (
           <Button size="sm" onClick={handleRedo} disabled={busy}>
-            {busy ? "Redoing…" : "Redo"}
+            {busy ? "Redoing…" : redoLabel}
           </Button>
         )}
         {currentVersionId ? <DownloadButton reviewEndpoint={reviewEndpoint} assetVersionId={currentVersionId} /> : null}

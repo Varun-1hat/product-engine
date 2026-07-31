@@ -41,6 +41,7 @@ export const SLOTS = [
   "end_frame_image",
   "final_render",
   "music_track",
+  "clip_audio",
 ] as const;
 export type Slot = (typeof SLOTS)[number];
 

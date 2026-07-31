@@ -19,14 +19,27 @@ export interface TrimJobPayload {
   end_s: number;
 }
 
-async function reencodeTrim(inputPath: string, outputPath: string, startS: number, endS: number): Promise<void> {
+async function reencodeTrim(
+  inputPath: string,
+  outputPath: string,
+  startS: number,
+  endS: number,
+  audioOnly: boolean
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    ffmpeg(inputPath)
+    const cmd = ffmpeg(inputPath)
       .setStartTime(startS)
       .duration(Math.max(0.01, endS - startS))
-      .videoCodec("libx264")
-      .audioCodec("aac")
-      .outputOptions(["-pix_fmt", "yuv420p"])
+      .audioCodec("aac");
+    // A clip's audio is its own asset (src/lib/jobs/clipAudio.ts), so it is
+    // trimmed through this same job with its own range — that is what lets
+    // picture and sound be cut independently as well as together.
+    if (audioOnly) {
+      cmd.noVideo();
+    } else {
+      cmd.videoCodec("libx264").outputOptions(["-pix_fmt", "yuv420p"]);
+    }
+    cmd
       .on("error", (err) => reject(err))
       .on("end", () => resolve())
       .save(outputPath);
@@ -49,16 +62,20 @@ export async function runTrimJob(supa: ServiceClient, storage: StorageClient, jo
 
   const asset = await getAsset(supa, job.asset_id);
 
+  const audioOnly = asset.media_type === "audio";
+  const ext = audioOnly ? "m4a" : "mp4";
+  const mime = audioOnly ? "audio/mp4" : "video/mp4";
+
   await withTempDir(async (dir) => {
     const inputBuffer = await storage.download("assets", baseVersion.storage_path!);
-    const inputPath = await writeTempFile(dir, "input.mp4", inputBuffer);
-    const outputPath = `${dir}/output.mp4`;
+    const inputPath = await writeTempFile(dir, `input.${ext}`, inputBuffer);
+    const outputPath = `${dir}/output.${ext}`;
 
-    await reencodeTrim(inputPath, outputPath, payload.start_s, payload.end_s);
+    await reencodeTrim(inputPath, outputPath, payload.start_s, payload.end_s, audioOnly);
     const outputBuffer = await readTempFile(outputPath);
 
-    const destPath = baseVersion.storage_path!.replace(/\.[a-z0-9]+$/i, "") + `-trim-${Date.now()}.mp4`;
-    await storage.upload("assets", destPath, outputBuffer, "video/mp4");
+    const destPath = baseVersion.storage_path!.replace(/\.[a-z0-9]+$/i, "") + `-trim-${Date.now()}.${ext}`;
+    await storage.upload("assets", destPath, outputBuffer, mime);
 
     await upsertAssetVersion(supa, {
       assetId: asset.id,

@@ -48,6 +48,12 @@ export interface ReviewHooks {
    * start/end role for images, a scene for clips, nothing for the outro).
    */
   uploadNewAsset?(target: { sceneId?: string; role?: "start" | "end" }, storagePath: string): Promise<AssetVersion>;
+  /**
+   * Whether this asset is used in the final render, without touching its
+   * versions. Only clip audio is optional in that way today (src/lib/clipAudio.ts);
+   * every other slot is used unconditionally, so they don't implement it.
+   */
+  setAudioEnabled?(assetId: string, enabled: boolean): Promise<void>;
   revertPrompt(promptId: string, versionNo: number): Promise<void>;
   revertAsset(assetId: string, versionNo: number): Promise<void>;
   download(assetVersionId: string): Promise<string>;

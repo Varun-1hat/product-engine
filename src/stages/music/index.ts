@@ -4,6 +4,13 @@
  * uploaded as an override — either way it lands in the music/ bucket ->
  * reel_config.music_path + music_trim, applied at assembly (Stage 9):
  * trim + fade to length; loop if shorter (brief §10.20).
+ *
+ * Two lengths, one call: generate() with no `target_clip` produces that
+ * reel-length background bed; with one it produces a track for a single clip,
+ * which becomes a version of that clip's `clip_audio` slot (src/lib/clipAudio.ts)
+ * rather than touching the bed. The bed and the clips' own audio play together
+ * in the final mix, so this stage is where a reel's whole soundtrack is
+ * assembled — background underneath, per-clip audio on top.
  */
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -16,6 +23,7 @@ import { getBrandContext } from "@/src/lib/brandContext";
 import { getScenesForReel } from "@/src/lib/rows";
 import { promptStaleness, targetModelFor } from "@/src/skills/model-prompt/guidance";
 import { reelModelContext } from "@/src/lib/modelConstraints";
+import { OUTRO_KEY, getClipAudioAsset, resolveClipAudioTarget } from "@/src/lib/clipAudio";
 
 export const musicInputSchema = z.object({
   /** Already-uploaded (music/ bucket) path for the new/replacement track — omit to only change the trim. */
@@ -39,6 +47,13 @@ export const musicGenerateInputSchema = z.object({
   prompt: z.string().min(1).optional(),
   provider: z.enum(PROVIDERS).optional(),
   duration_s: z.number().positive().optional(),
+  /**
+   * Omit to generate the reel-length background track (the original
+   * behaviour). A scene id — or "outro" — instead generates for that one clip,
+   * landing as a new version of its `clip_audio` slot alongside the model's
+   * own take and any upload, so all three are revertable from one history.
+   */
+  target_clip: z.union([z.string().uuid(), z.literal(OUTRO_KEY)]).optional(),
 });
 export type MusicGenerateInput = z.infer<typeof musicGenerateInputSchema>;
 
@@ -206,7 +221,14 @@ export async function generate(input: MusicGenerateInput, ctx: StageContext): Pr
   const prompt = resolved;
   if (!prompt?.trim()) throw new Error("a music prompt is required before generating");
   const provider = input.provider ?? reelConfig.music_provider ?? DEFAULT_MUSIC_PROVIDER;
-  const requestedDurationS = input.duration_s ?? Number(reelConfig.total_seconds_target);
+
+  // Clip-wise: the track is written for one clip, so it is that clip's length
+  // that matters, not the reel's. The model's own minimum still applies below
+  // (ElevenLabs will not go under 10s), and a track longer than its clip is
+  // simply truncated to it when the audio lane is laid out at assembly.
+  const clipTarget = input.target_clip ? await resolveClipAudioTarget(ctx, input.target_clip) : null;
+  const requestedDurationS =
+    input.duration_s ?? clipTarget?.clip_duration_s ?? Number(reelConfig.total_seconds_target);
 
   const adapter = ctx.adapters.get("music", provider);
   // Each music model has its own length window (ElevenLabs 10-300s, Lyria is
@@ -239,6 +261,7 @@ export async function generate(input: MusicGenerateInput, ctx: StageContext): Pr
   await ctx.costEngine.log({
     reel_id: ctx.reelId,
     client_id: ctx.clientId,
+    scene_id: clipTarget?.scene_id ?? undefined,
     stage: "music",
     provider,
     adapter: adapter.id,
@@ -248,6 +271,38 @@ export async function generate(input: MusicGenerateInput, ctx: StageContext): Pr
     unit_type: result.unit_type,
     idempotency_key: idempotencyKey,
   });
+
+  // Clip-wise generation targets that clip's own audio slot and leaves the
+  // reel's background track alone — the two coexist in the final mix.
+  if (clipTarget) {
+    if (!result.asset?.storage_path) throw new Error(`${provider} returned no track to attach to the clip`);
+
+    // The music adapters land their output in the `music/` bucket (that is
+    // where a reel's background track belongs). Clip audio is an ordinary
+    // reel asset and is read from `assets/` everywhere — by the signed
+    // previews and by assembly — so copy it across rather than making every
+    // clip-audio reader carry a per-version bucket.
+    const mime = result.asset.mime;
+    const ext = mime.split("/").pop() ?? "mp3";
+    const destPath = `${ctx.clientId}/${ctx.reelId}/clip_audio/${clipTarget.scene_id ?? OUTRO_KEY}/${idempotencyKey}.${ext}`;
+    await ctx.storage.upload("assets", destPath, await ctx.storage.download("music", result.asset.storage_path), mime);
+
+    const existing = await getClipAudioAsset(ctx.supa, ctx.reelId, clipTarget.scene_id);
+    await upsertAssetVersion(ctx.supa, {
+      assetId: existing?.id,
+      reel_id: ctx.reelId,
+      scene_id: clipTarget.scene_id,
+      slot: "clip_audio",
+      media_type: "audio",
+      storage_path: destPath,
+      source: "generated",
+      provider,
+      metadata: { mime, duration_s: durationS, source_clip_asset_id: clipTarget.clip_asset_id },
+      units: result.units,
+      unit_type: result.unit_type,
+    });
+    return { reel_config: reelConfig };
+  }
 
   return process(
     {

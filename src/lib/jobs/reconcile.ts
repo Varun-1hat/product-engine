@@ -50,15 +50,26 @@ function stageForJob(job: Job): StageId {
   return "clip";
 }
 
+/**
+ * `payload.variant` carries Veo's billing form ('fast@1080p' — composeVeoVariant),
+ * but capabilities() keys on the bare model variant. Strip the resolution
+ * qualifier rather than let the lookup silently fall back to the default tier.
+ */
+function bareVariant(variant: string | null | undefined): string | undefined {
+  return variant ? variant.split("@")[0] : undefined;
+}
+
 export async function reconcileJob(deps: {
   supa: ServiceClient;
   costEngine: CostEngine;
   jobs: JobQueue;
   adapters: AdapterRegistry;
   keys: KeyResolver;
+  /** Only needed to demux a finished clip's native audio; omit and that step is skipped. */
+  storage?: StorageClient;
   job: Job;
 }): Promise<void> {
-  const { supa, costEngine, jobs, adapters, keys, job } = deps;
+  const { supa, costEngine, jobs, adapters, keys, storage, job } = deps;
   const payload = (job.payload ?? {}) as AsyncGenJobPayload;
 
   const category = categoryForJob(job, payload);
@@ -123,6 +134,24 @@ export async function reconcileJob(deps: {
     });
 
     await jobs.complete(job.id, { asset_version_id: version.id });
+
+    // Keep the model's native audio as an asset of its own (see
+    // ./clipAudio.ts). Deliberately after complete() and swallowed on
+    // failure: the clip is the paid artifact and is now safely persisted,
+    // whereas the audio is a free local derivation that the clip-audio GET
+    // re-attempts on the next read. Letting a demux failure fall into the
+    // catch below would re-arm a poll for a generation that already
+    // succeeded — and eventually log it as failed_unbilled.
+    if (storage && adapter.capabilities(bareVariant(payload.variant)).emits_audio) {
+      try {
+        // Imported here, not at module scope: ./clipAudio.ts pulls in
+        // ffmpeg-static, and this module loads on every stage GET.
+        const { ensureClipAudio } = await import("@/src/lib/jobs/clipAudio");
+        await ensureClipAudio(supa, storage, job.asset_id);
+      } catch (audioErr) {
+        console.error(`[jobs] clip audio extraction failed for asset ${job.asset_id}:`, audioErr);
+      }
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
 
@@ -180,6 +209,7 @@ export async function runReconcileTick(deps: {
         jobs: deps.jobs,
         adapters: deps.adapters,
         keys: deps.keys,
+        storage: deps.storage,
         job,
       })
     )

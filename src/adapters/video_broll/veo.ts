@@ -2,9 +2,11 @@
  * Veo 3.1 — video_broll adapter (spec §3.3, §14.2). WAVE 1, full. See
  * skills/providers/veo/SKILL.md.
  *
- * Async, no webhook — src/lib/jobs/reconcile.ts polls. Emits native audio
- * (stripped on ingest/assembly elsewhere); supports_end_frame=true is what
- * makes shared-boundary continuity possible (§2.4 routing rule).
+ * Async, no webhook — src/lib/jobs/reconcile.ts polls. Emits native audio,
+ * which is demuxed into the clip's own `clip_audio` asset once the job
+ * completes (src/lib/jobs/clipAudio.ts) rather than discarded;
+ * supports_end_frame=true is what makes shared-boundary continuity possible
+ * (§2.4 routing rule).
  *
  * IMPORTANT contract-shape note (see also src/lib/jobs/reconcile.ts): the given
  * `poll(provider_job_id, provider_key)` signature (spec §3) carries no
