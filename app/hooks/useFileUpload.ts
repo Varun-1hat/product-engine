@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-export type UploadKind = "logo" | "product_photo" | "music" | "end_frame" | "asset";
+export type UploadKind = "logo" | "music" | "end_frame" | "asset";
 
 export interface UseFileUploadResult {
   upload: (file: File, kind: UploadKind, reelId?: string) => Promise<string>;

@@ -12,6 +12,7 @@ import { createKeyResolver } from "./crypto/vault";
 import { getDefaultAdapterRegistry } from "@/src/adapters/registry";
 import { createSkillRegistry } from "@/src/skills/types";
 import type { LlmUsageSink } from "@/src/skills/llm";
+import { DEFAULT_ORCHESTRATOR_MODEL, providerForOrchestratorModel } from "./orchestratorModels";
 import type { StageContext } from "@/src/stages/types";
 import type { ConfigStageContext } from "@/src/stages/config";
 import type { ReelSetupStageContext } from "@/src/stages/reel-setup";
@@ -30,18 +31,29 @@ export async function buildStageContext(reelId: string): Promise<StageContext> {
   const reel = await getReel(reelId);
   const costEngine = createCostEngine(supa);
 
+  // The orchestrating LLM is a per-reel Stage 2 choice; null = the built-in
+  // default (callLlmJson resolves it).
+  const { data: cfg, error: cfgError } = await supa
+    .from("reel_config")
+    .select("orchestrator_model")
+    .eq("reel_id", reelId)
+    .maybeSingle();
+  if (cfgError) throw new Error(`reel_config lookup failed: ${cfgError.message}`);
+  const orchestratorModel = (cfg as { orchestrator_model: string | null } | null)?.orchestrator_model ?? undefined;
+
   // Every runtime-skill LLM call (prompt generation + orchestration) is
   // billed to this reel, as two cost_log rows — input and output tokens are
   // priced differently, and cost_log carries a single units/unit_type pair.
   // Logged against the reel's current stage; `adapter` records which model
-  // actually ran. Failures here are swallowed by callLlmJson's onUsage guard
-  // so bookkeeping can never break a generation.
+  // actually ran, and `provider` follows from it (anthropic vs gemini).
+  // Failures here are swallowed by callLlmJson's onUsage guard so bookkeeping
+  // can never break a generation.
   const logLlmUsage: LlmUsageSink = async (usage) => {
     const common = {
       reel_id: reelId,
       client_id: reel.client_id,
       stage: reel.current_stage,
-      provider: "anthropic" as const,
+      provider: providerForOrchestratorModel(usage.model),
       adapter: usage.model,
       call_type: "generate" as const,
       call_status: "success" as const,
@@ -50,9 +62,22 @@ export async function buildStageContext(reelId: string): Promise<StageContext> {
     await costEngine.log({ ...common, units: usage.output_tokens, unit_type: "output_token" });
   };
 
+  // Per-client orchestrator key (Config > Keys), so each client's LLM spend
+  // lands on their own account. Not configured => the agency-level env key.
+  const keys = createKeyResolver(supa);
+  const orchestratorProvider = providerForOrchestratorModel(
+    orchestratorModel ?? process.env.ANTHROPIC_MODEL ?? DEFAULT_ORCHESTRATOR_MODEL
+  );
+  let orchestratorKey: string | undefined;
+  try {
+    orchestratorKey = await keys.forProvider(reel.client_id, orchestratorProvider);
+  } catch {
+    orchestratorKey = undefined;
+  }
+
   const [adapters, skills] = await Promise.all([
     getDefaultAdapterRegistry(),
-    createSkillRegistry(logLlmUsage),
+    createSkillRegistry(logLlmUsage, orchestratorModel, orchestratorKey),
   ]);
 
   return {
@@ -64,7 +89,7 @@ export async function buildStageContext(reelId: string): Promise<StageContext> {
     skills,
     jobs: createJobQueue(supa),
     storage: createStorageClient(supa),
-    keys: createKeyResolver(supa),
+    keys,
   };
 }
 

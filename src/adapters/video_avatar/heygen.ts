@@ -9,7 +9,7 @@
  * units=1, unit_type='video' — no ambiguity like Veo's duration-dependent
  * billing.
  *
- * Contract-shape note (see also worker/reconcile.ts and
+ * Contract-shape note (see also src/lib/jobs/reconcile.ts and
  * app/api/webhooks/heygen/route.ts): poll()'s given signature
  * (provider_job_id, provider_key) and parseWebhook()'s given signature
  * (payload only, SYNCHRONOUS — no I/O possible) carry no aspect_ratio/

@@ -1,5 +1,5 @@
 /**
- * worker/assembly.ts — Stage 9 assembly job handler (job_type_t
+ * src/lib/jobs/assembly.ts — Stage 9 assembly job handler (job_type_t
  * 'assembly', spec §7 Stage 9). Executes the deterministic
  * src/stages/assembly/plan.ts AssemblyPlan with real ffmpeg commands:
  * strip audio + normalize every clip (resolution/aspect/fps/yuv420p/
@@ -10,7 +10,7 @@
  * `reels.status='assembled'`.
  */
 import path from "node:path";
-import { writeFile } from "node:fs/promises";
+import { writeFile, stat } from "node:fs/promises";
 import ffmpeg from "./ffmpegSetup";
 import { withTempDir, writeTempFile, readTempFile } from "./tempFiles";
 import type { ServiceClient } from "@/src/lib/supabase/service";
@@ -72,6 +72,25 @@ export async function concatClips(clipPaths: string[], dir: string, outputPath: 
   }, outputPath);
 }
 
+/**
+ * Real duration of a media file, read off ffmpeg's own stream header
+ * (`codecData`) — ffmpeg-static ships no ffprobe binary.
+ */
+function probeDurationS(filePath: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let duration = 0;
+    ffmpeg(filePath)
+      .on("codecData", (data: { duration: string }) => {
+        const [h, m, s] = data.duration.split(":").map(Number);
+        if (Number.isFinite(h + m + s)) duration = h * 3600 + m * 60 + s;
+      })
+      .on("error", (err: Error) => reject(err))
+      .on("end", () => resolve(duration))
+      .outputOptions(["-frames:v", "1", "-f", "null"])
+      .save(process.platform === "win32" ? "NUL" : "/dev/null");
+  });
+}
+
 /** Trim/loop the source track to the total reel duration and apply fade in/out (§10.20). */
 export async function buildMusicTrack(
   inputPath: string,
@@ -92,13 +111,29 @@ export async function buildMusicTrack(
 
   const outputPath = path.join(dir, "music_final.m4a");
   const fadeOutStart = Math.max(0, totalDurationS - musicPlan.fade_out_s);
+  // Real segment length from the WAV we just wrote (44.1kHz stereo s16 = 176400 B/s).
+  // The plan's end_s can overshoot the source file, so it can't be trusted here.
+  const segmentBytes = (await stat(segmentPath)).size;
+  const segmentS = Math.max(0.01, (segmentBytes - 44) / 176400);
+  // Seamless loop: crossfade each repeat into the next instead of butt-joining copies.
+  const crossfadeS = Math.min(1, segmentS / 4);
+  const copies =
+    segmentS >= totalDurationS
+      ? 1
+      : Math.min(100, Math.ceil((totalDurationS - segmentS) / Math.max(0.01, segmentS - crossfadeS)) + 1);
+
   await runFfmpeg((cmd) => {
-    cmd.input(segmentPath);
-    if (musicPlan.loop) cmd.inputOptions(["-stream_loop", "-1"]);
-    cmd
-      .duration(totalDurationS)
-      .audioFilters([`afade=t=in:st=0:d=${musicPlan.fade_in_s}`, `afade=t=out:st=${fadeOutStart}:d=${musicPlan.fade_out_s}`])
-      .audioCodec("aac");
+    for (let i = 0; i < copies; i++) cmd.input(segmentPath);
+    const filters: string[] = [];
+    let last = "0:a";
+    for (let i = 1; i < copies; i++) {
+      filters.push(`[${last}][${i}:a]acrossfade=d=${crossfadeS}:c1=tri:c2=tri[x${i}]`);
+      last = `x${i}`;
+    }
+    filters.push(
+      `[${last}]atrim=0:${totalDurationS},afade=t=in:st=0:d=${musicPlan.fade_in_s},afade=t=out:st=${fadeOutStart}:d=${musicPlan.fade_out_s}[out]`
+    );
+    cmd.complexFilter(filters, "out").audioCodec("aac");
   }, outputPath);
 
   return outputPath;
@@ -146,7 +181,10 @@ export async function runAssemblyJob(supa: ServiceClient, storage: StorageClient
     if (plan.music) {
       const musicBuffer = await storage.download("music", plan.music.storage_path);
       const musicInputPath = await writeTempFile(dir, "music_in", musicBuffer);
-      audioPath = await buildMusicTrack(musicInputPath, dir, plan.music, plan.total_duration_s);
+      // Cover the video that actually came out of concat — plan.total_duration_s is
+      // scene-metadata math and can be well short of the real clip lengths.
+      const videoDurationS = await probeDurationS(concatenatedPath);
+      audioPath = await buildMusicTrack(musicInputPath, dir, plan.music, videoDurationS || plan.total_duration_s);
     }
 
     const finalPath = path.join(dir, "final.mp4");

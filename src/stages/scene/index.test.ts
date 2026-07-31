@@ -32,7 +32,8 @@
  * see the additive changes there.
  */
 import { describe, expect, it, vi } from "vitest";
-import { sceneStage } from "./index";
+import { regenerateSceneDescription, regenerateScenePrompt, sceneStage } from "./index";
+import { SCENE_BRAIN_SYSTEM_PROMPT } from "@/src/skills/scene-brain";
 import { createCostEngine } from "@/src/lib/cost/engine";
 import { createJobQueue } from "@/src/lib/jobs/queue";
 import { createStorageClient } from "@/src/lib/storage";
@@ -77,7 +78,6 @@ function seedSupa(): FakeSupabaseClient {
         reel_id: REEL_ID,
         position: 0,
         type: "broll",
-        product_in_scene: false,
         seconds: 5,
         transition_to_next: null,
         broll_provider_override: null,
@@ -88,7 +88,6 @@ function seedSupa(): FakeSupabaseClient {
       },
     ] as FakeRow[],
     client_config: [],
-    products: [],
   });
 }
 
@@ -104,13 +103,31 @@ function fakeAdapters(): AdapterRegistry {
   };
 }
 
-function makeCtx(supa: FakeSupabaseClient, sceneBrain: SkillRegistry["sceneBrain"]): StageContext {
+function makeCtx(
+  supa: FakeSupabaseClient,
+  sceneBrain: SkillRegistry["sceneBrain"],
+  sceneDescription?: SkillRegistry["sceneDescription"],
+  sceneInstruction?: SkillRegistry["sceneInstruction"]
+): StageContext {
   const supaClient = supa as unknown as ServiceClient;
   const skills: SkillRegistry = {
     sceneBrain,
     imagePrompt: async () => {
       throw new Error("imagePrompt should not be called by sceneStage.process()");
     },
+    musicPrompt: async () => {
+      throw new Error("musicPrompt should not be called by sceneStage.process()");
+    },
+    sceneDescription:
+      sceneDescription ??
+      (async () => {
+        throw new Error("sceneDescription should not be called by sceneStage.process()");
+      }),
+    sceneInstruction:
+      sceneInstruction ??
+      (async () => {
+        throw new Error("sceneInstruction should not be called by sceneStage.process()");
+      }),
     brandStyleLock: async () => {
       throw new Error("brandStyleLock should not be called by sceneStage.process()");
     },
@@ -146,8 +163,7 @@ describe("sceneStage.process() — save vs regenerate (spec §3.1/§3.2)", () =>
             id: SCENE_ID,
             position: 0,
             type: "broll",
-            product_in_scene: false,
-            seconds: 5,
+                seconds: 5,
             transition_to_next: null,
             broll_provider_override: null,
             description: "edited description",
@@ -175,8 +191,7 @@ describe("sceneStage.process() — save vs regenerate (spec §3.1/§3.2)", () =>
       scenes: [
         {
           type: "broll",
-          product_in_scene: false,
-          seconds: 6,
+            seconds: 6,
           transition_to_next: null,
           description: "brand new generated scene",
         },
@@ -194,5 +209,146 @@ describe("sceneStage.process() — save vs regenerate (spec §3.1/§3.2)", () =>
     const staleRow = supa._tables.scenes.find((s) => s.id === SCENE_ID);
     expect(staleRow).toBeUndefined();
     expect(supa._tables.scenes).toHaveLength(1);
+  });
+});
+
+/**
+ * regenerateSceneDescription() — the single-scene re-roll behind the scene
+ * page's "Regenerate description" button.
+ *
+ * The property worth pinning is the one that motivated a separate function
+ * rather than another mode of process(): it must touch exactly one row. The
+ * existing escape hatch ("Re-run scene-brain") replaces the whole list, so
+ * re-rolling one weak shot used to cost every edit made to the others.
+ */
+describe("regenerateSceneDescription() — one scene, nothing else", () => {
+  const OTHER_ID = "scene-2";
+
+  function seedTwoScenes(): FakeSupabaseClient {
+    const supa = seedSupa();
+    supa._tables.scenes.push({
+      id: OTHER_ID,
+      reel_id: REEL_ID,
+      position: 1,
+      type: "broll",
+      seconds: 4,
+      transition_to_next: null,
+      broll_provider_override: null,
+      description: "the neighbouring shot",
+      start_image_id: null,
+      end_image_id: null,
+      clip_asset_id: null,
+    });
+    return supa;
+  }
+
+  it("rewrites only the target scene and leaves its siblings byte-for-byte alone", async () => {
+    const supa = seedTwoScenes();
+    const sceneDescription = vi.fn().mockResolvedValue({ description: "a freshly written shot" });
+    const ctx = makeCtx(supa, vi.fn().mockRejectedValue(new Error("must not be called")), sceneDescription);
+
+    const updated = await regenerateSceneDescription(ctx, SCENE_ID);
+
+    expect(updated.description).toBe("a freshly written shot");
+    expect(supa._tables.scenes.find((s) => s.id === SCENE_ID)!.description).toBe("a freshly written shot");
+    expect(supa._tables.scenes.find((s) => s.id === OTHER_ID)!.description).toBe("the neighbouring shot");
+    expect(supa._tables.scenes).toHaveLength(2);
+  });
+
+  it("passes the real neighbours, so the rewrite can stay continuous with them", async () => {
+    const supa = seedTwoScenes();
+    const sceneDescription = vi.fn().mockResolvedValue({ description: "rewritten" });
+    const ctx = makeCtx(supa, vi.fn(), sceneDescription);
+
+    await regenerateSceneDescription(ctx, SCENE_ID);
+
+    const input = sceneDescription.mock.calls[0][0];
+    // Scene 0 has no predecessor; its successor is the seeded sibling.
+    expect(input.previous_scene).toBeNull();
+    expect(input.next_scene).toMatchObject({ description: "the neighbouring shot" });
+    // The old text goes along so the model can avoid returning a paraphrase.
+    expect(input.scene.description).toBe("original description");
+    // The slot itself is fixed — only prose is being re-rolled.
+    expect(input.scene).toMatchObject({ position: 0, type: "broll", seconds: 5 });
+  });
+
+  it("gives the rewrite the same model constraints scene-brain gets", async () => {
+    const supa = seedTwoScenes();
+    const sceneDescription = vi.fn().mockResolvedValue({ description: "rewritten" });
+    const ctx = makeCtx(supa, vi.fn(), sceneDescription);
+
+    await regenerateSceneDescription(ctx, SCENE_ID);
+
+    // The seeded reel is veo/fast at 1080p — a rewrite must stay renderable too.
+    const sets = sceneDescription.mock.calls[0][0].model_constraints;
+    expect(sets?.[0]).toMatchObject({ role: "b-roll", model: "Veo 3.1 Fast" });
+  });
+
+  it("refuses a scene id belonging to another reel rather than writing to it", async () => {
+    const supa = seedTwoScenes();
+    const ctx = makeCtx(supa, vi.fn(), vi.fn());
+    await expect(regenerateSceneDescription(ctx, "scene-from-another-reel")).rejects.toThrow(/does not belong/);
+  });
+});
+
+/**
+ * regenerateScenePrompt() — the scene page's "Write/Rewrite with AI" on the
+ * instruction itself.
+ *
+ * Two properties are worth pinning. It persists (the page offers "Reset to
+ * default" as the undo, and would otherwise lose the draft on reload), and it
+ * refines whatever instruction is currently in force rather than always
+ * restarting from the built-in default — otherwise pressing it twice discards
+ * the first rewrite instead of building on it.
+ */
+describe("regenerateScenePrompt() — rewriting scene-brain's own instruction", () => {
+  // The cast keeps `.mock.calls` inspectable on the caller's side while still
+  // satisfying makeCtx's typed parameter.
+  function ctxWith(supa: FakeSupabaseClient, sceneInstruction: ReturnType<typeof vi.fn>) {
+    return makeCtx(
+      supa,
+      vi.fn().mockRejectedValue(new Error("must not be called")),
+      undefined,
+      sceneInstruction as unknown as SkillRegistry["sceneInstruction"]
+    );
+  }
+
+  it("persists the rewritten instruction to reel_config.scene_prompt", async () => {
+    const supa = seedSupa();
+    const sceneInstruction = vi.fn().mockResolvedValue({ instruction: "a tailored instruction" });
+
+    const result = await regenerateScenePrompt(ctxWith(supa, sceneInstruction));
+
+    expect(result.scene_prompt).toBe("a tailored instruction");
+    expect(supa._tables.reel_config[0].scene_prompt).toBe("a tailored instruction");
+  });
+
+  it("starts from the built-in default when the reel has no custom instruction", async () => {
+    const supa = seedSupa();
+    const sceneInstruction = vi.fn().mockResolvedValue({ instruction: "rewritten" });
+
+    await regenerateScenePrompt(ctxWith(supa, sceneInstruction));
+
+    expect(sceneInstruction.mock.calls[0][0].current_instruction).toBe(SCENE_BRAIN_SYSTEM_PROMPT);
+  });
+
+  it("refines the reel's existing custom instruction instead of discarding it", async () => {
+    const supa = seedSupa();
+    supa._tables.reel_config[0].scene_prompt = "my hand-written instruction";
+    const sceneInstruction = vi.fn().mockResolvedValue({ instruction: "rewritten" });
+
+    await regenerateScenePrompt(ctxWith(supa, sceneInstruction));
+
+    expect(sceneInstruction.mock.calls[0][0].current_instruction).toBe("my hand-written instruction");
+  });
+
+  it("leaves the reel's existing scenes untouched — it changes the NEXT run, not this list", async () => {
+    const supa = seedSupa();
+    const sceneInstruction = vi.fn().mockResolvedValue({ instruction: "rewritten" });
+
+    await regenerateScenePrompt(ctxWith(supa, sceneInstruction));
+
+    expect(supa._tables.scenes).toHaveLength(1);
+    expect(supa._tables.scenes[0].description).toBe("original description");
   });
 });

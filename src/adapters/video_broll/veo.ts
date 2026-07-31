@@ -2,18 +2,18 @@
  * Veo 3.1 — video_broll adapter (spec §3.3, §14.2). WAVE 1, full. See
  * skills/providers/veo/SKILL.md.
  *
- * Async, no webhook — worker/reconcile.ts polls. Emits native audio
+ * Async, no webhook — src/lib/jobs/reconcile.ts polls. Emits native audio
  * (stripped on ingest/assembly elsewhere); supports_end_frame=true is what
  * makes shared-boundary continuity possible (§2.4 routing rule).
  *
- * IMPORTANT contract-shape note (see also worker/reconcile.ts): the given
+ * IMPORTANT contract-shape note (see also src/lib/jobs/reconcile.ts): the given
  * `poll(provider_job_id, provider_key)` signature (spec §3) carries no
  * client_id/reel_id/asset_id/aspect_ratio/resolution/duration_s/variant —
  * only what's needed to ask Google for status. So poll() persists the
  * finished video under a self-contained path keyed on provider+job id
  * (buildPollResultPath — nothing in this system parses paths back apart)
  * and reports BEST-EFFORT metadata/units/variant. The orchestrator
- * (worker/reconcile.ts), which already has the full `jobs` row (including
+ * (src/lib/jobs/reconcile.ts), which already has the full `jobs` row (including
  * `payload` — the original GenerateInput), is the authoritative source for
  * the real aspect_ratio/resolution/duration_s/variant and MUST reconcile
  * poll()'s result against `job.payload` before writing asset_versions
@@ -65,7 +65,7 @@ export function billableDurationS(requestedSeconds?: number): 4 | 6 | 8 {
  * pass the `isVeoVariant` check, so this composition must be used ONLY for
  * billing context (EstimateCall.variant, and the job.payload.variant a
  * completed job is cost-logged with) — never inside GenerateInput.variant
- * itself. Exported so src/stages/clip, src/stages/outro, and worker/outro.ts
+ * itself. Exported so src/stages/clip, src/stages/outro, and src/lib/jobs/outro.ts
  * all compose the exact same string.
  */
 export function composeVeoVariant(bareVariant: string, resolution: string): string {
@@ -163,7 +163,7 @@ const OMNI_JOB_PREFIX = "omni:";
  * no last-frame interpolation and no duration control (docs "Limitations"), so
  * the clip is billed/trimmed against the requested duration like any other.
  * background+store so the result is retrievable later by the existing
- * poll/reconcile worker instead of blocking the request.
+ * reconcile pass instead of blocking the request.
  */
 async function generateOmni(
   input: GenerateInput,

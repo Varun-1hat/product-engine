@@ -10,7 +10,7 @@
  * route handler (which has full job context from the callback_token
  * lookup) downloads it and persists the asset_version + cost_log, mirroring
  * the same "reconcile poll()'s best-effort result against jobs.payload"
- * pattern as worker/reconcile.ts (see that file's header note).
+ * pattern as src/lib/jobs/reconcile.ts (see that file's header note).
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/src/lib/supabase/service";
@@ -107,7 +107,12 @@ export async function POST(req: NextRequest) {
       provider_asset_id: parsed.provider_job_id,
       idempotency_key: job.idempotency_key ?? undefined,
     });
-    await jobs.fail(job.id, "heygen webhook reported avatar_video.fail");
+    // Terminal: HeyGen says the generation failed and the cost is already
+    // logged above. {retry:false} keeps this out of fail()'s default retry
+    // branch, which parks the row at 'queued' — a status nothing picks up
+    // now that jobs run inline (avatar_gen never passes through the
+    // dispatcher, so it would strand there forever).
+    await jobs.fail(job.id, "heygen webhook reported avatar_video.fail", { retry: false });
     return NextResponse.json({ ok: true });
   }
 
@@ -126,7 +131,9 @@ export async function POST(req: NextRequest) {
       hostname = parsed.asset.url;
     }
     const message = `heygen webhook: refusing to download from disallowed host ${hostname}`;
-    await jobs.fail(job.id, message);
+    // Terminal (see the avatar_video.fail branch above) — retrying a
+    // disallowed host can't succeed, and 'queued' strands the job.
+    await jobs.fail(job.id, message, { retry: false });
     return NextResponse.json({ error: message }, { status: 400 });
   }
 

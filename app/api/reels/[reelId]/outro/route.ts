@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildStageContext } from "@/src/lib/context";
 import { outroStage } from "@/src/stages/outro";
+import { reconcilePendingJobs } from "@/src/lib/jobs/run";
 import { assetHistory, getAsset, getCurrentPromptVersion, promptHistory } from "@/src/lib/versioning";
 import type { StageContext } from "@/src/stages/types";
 import type { ReelConfigRow } from "@/src/lib/db/types";
@@ -74,6 +75,10 @@ async function buildSlotDetail(ctx: StageContext, assetId: string): Promise<Slot
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ reelId: string }> }) {
   const { reelId } = await params;
   const ctx = await buildStageContext(reelId);
+  // Finish any provider generations that completed since the last read
+  // (src/lib/jobs/run.ts) — this is what advances an awaiting_provider outro
+  // clip now that there's no standing poller. Never throws.
+  await reconcilePendingJobs(ctx);
   const state = await outroStage.load(ctx);
   const reelConfig = (state.data as { reelConfig: ReelConfigRow }).reelConfig;
 

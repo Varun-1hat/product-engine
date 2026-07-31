@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
+import { Switch } from "./ui/switch";
+import { useFileUpload } from "@/app/hooks/useFileUpload";
 import { VersionHistory, type VersionHistoryEntry } from "./VersionHistory";
 
 export interface PromptReviewProps {
@@ -16,15 +18,31 @@ export interface PromptReviewProps {
   shared?: boolean;
   /** Reference images already attached to the current version. */
   currentRefs?: string[];
-  /** Product photos offered for attaching; omit to hide the reference picker entirely. */
-  referenceOptions?: ReferenceOption[];
+  /**
+   * Set when this prompt was optimised for a different model than the one that
+   * will now run it (src/skills/model-prompt/guidance.ts). Advisory — the
+   * prompt still generates; re-optimising is just the redo, which rewrites it
+   * for the current model.
+   */
+  staleness?: PromptStalenessInfo | null;
+  /**
+   * The stage's prompts endpoint, e.g. `/api/reels/{reelId}/image/prompts` —
+   * where the per-asset "use reel product references" toggle is persisted.
+   * Together with clientId/reelId it also enables adding stage-level
+   * reference images on top of the reel's product references.
+   */
+  promptsEndpoint?: string;
+  /** Current per-asset state of the product-references toggle (default on). */
+  useProductRefs?: boolean;
+  clientId?: string | null;
+  reelId?: string;
   onChanged?: () => void;
 }
 
-export interface ReferenceOption {
-  path: string;
-  url: string | null;
-  product_name: string;
+export interface PromptStalenessInfo {
+  written_for: string;
+  will_run_on: string;
+  message: string;
 }
 
 /**
@@ -33,10 +51,9 @@ export interface ReferenceOption {
  * skill. Both create a new prompt_version and re-point current_version_id
  * (spec §2.4) — nothing is destroyed.
  *
- * When `referenceOptions` is supplied, product photos can also be attached
- * to the prompt: they're saved alongside the text as the version's
- * reference_paths, and the image stage passes exactly those to the provider
- * as visual references, so the generation has the real product to work from.
+ * `currentRefs` (the version's reference_paths) are this asset's own
+ * stage-level reference images — added here, and sent alongside the reel's
+ * product references unless this asset opts out of them.
  */
 export function PromptReview({
   reviewEndpoint,
@@ -46,17 +63,23 @@ export function PromptReview({
   history = [],
   shared,
   currentRefs = [],
-  referenceOptions,
+  staleness,
+  promptsEndpoint,
+  useProductRefs = true,
+  clientId,
+  reelId,
   onChanged,
 }: PromptReviewProps) {
   const [text, setText] = useState(currentText);
   const [refs, setRefs] = useState<string[]>(currentRefs);
-  const [busy, setBusy] = useState<"redo" | "save" | null>(null);
+  const [useProduct, setUseProduct] = useState(useProductRefs);
+  const [busy, setBusy] = useState<"redo" | "save" | "refs" | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  function toggleRef(path: string) {
-    setRefs((prev) => (prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path]));
-  }
+  const { upload } = useFileUpload(clientId ?? "");
+  // "Leave as is" only hides the notice for this session — it deliberately does
+  // not write anything, so the mismatch is re-surfaced on reload until the
+  // prompt or the model actually changes.
+  const [dismissed, setDismissed] = useState(false);
 
   async function call(action: "redoPrompt" | "editPrompt", extra: Record<string, unknown> = {}) {
     const res = await fetch(reviewEndpoint, {
@@ -76,6 +99,41 @@ export function PromptReview({
       const version = await call("redoPrompt");
       setText(version.text);
       setRefs(version.reference_paths ?? []);
+      onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Per-asset only — never touches the reel's product references or any other asset. */
+  async function handleToggleProduct(checked: boolean) {
+    setUseProduct(checked);
+    setError(null);
+    try {
+      const res = await fetch(promptsEndpoint!, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt_id: promptId, use_product_refs: checked }),
+      });
+      if (!res.ok) throw new Error(((await res.json()) as { error?: string }).error ?? "toggle failed");
+    } catch (err) {
+      setUseProduct(!checked);
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Stage-level additions — stored on this prompt, sent alongside the reel defaults. */
+  async function handleAddRefs(files: FileList) {
+    setBusy("refs");
+    setError(null);
+    try {
+      const uploaded: string[] = [];
+      for (const file of Array.from(files)) uploaded.push(await upload(file, "asset", reelId));
+      const next = [...refs, ...uploaded];
+      await call("editPrompt", { text, refs: next });
+      setRefs(next);
       onChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -106,36 +164,44 @@ export function PromptReview({
         ) : null}
       </div>
 
+      {staleness && !dismissed ? (
+        <div className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+          <span className="text-xs">{staleness.message}</span>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={handleRedo} disabled={busy !== null}>
+              {busy === "redo" ? "Re-optimising…" : `Re-optimise for ${staleness.will_run_on}`}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setDismissed(true)} disabled={busy !== null}>
+              Leave as is
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       <Textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} />
 
-      {referenceOptions && referenceOptions.length > 0 ? (
-        <div className="flex flex-col gap-1">
-          <span className="text-xs text-muted-foreground">
-            Attach product photos as references ({refs.length} selected) — saved with the prompt
-          </span>
-          <div className="flex flex-wrap gap-2">
-            {referenceOptions.map((option) => {
-              const selected = refs.includes(option.path);
-              return (
-                <button
-                  key={option.path}
-                  type="button"
-                  onClick={() => toggleRef(option.path)}
-                  title={option.product_name}
-                  className={`h-16 w-16 overflow-hidden rounded-md border border-border ${selected ? "ring-2 ring-primary" : ""}`}
-                >
-                  {option.url ? (
-                    // eslint-disable-next-line @next/next/no-img-element -- signed Storage URL, not a static asset
-                    <img src={option.url} alt={option.product_name} className="h-full w-full object-cover" />
-                  ) : (
-                    <span className="flex h-full w-full items-center justify-center p-1 text-center text-[10px] text-muted-foreground">
-                      {option.product_name}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
+      {promptsEndpoint ? (
+        <div className="flex flex-col gap-2 rounded-md border border-border p-2">
+          <label className="flex items-center gap-2 text-xs">
+            <Switch checked={useProduct} onCheckedChange={handleToggleProduct} disabled={busy !== null} />
+            Use reel product references
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              {refs.length > 0 ? `${refs.length} extra reference image(s)` : "no extra reference images"} —
+            </span>
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              disabled={busy !== null || !clientId}
+              onChange={(e) => {
+                if (e.target.files?.length) handleAddRefs(e.target.files);
+                e.target.value = "";
+              }}
+              className="text-xs"
+            />
+          </label>
         </div>
       ) : null}
 
@@ -143,8 +209,11 @@ export function PromptReview({
         <Button size="sm" onClick={handleSave} disabled={busy !== null}>
           {busy === "save" ? "Saving…" : "Save edit"}
         </Button>
+        {/* Named for what it does, not for how it does it: "Redo (re-run
+            skill)" read as an internal action and users did not realise this
+            regenerates the prompt itself rather than the asset. */}
         <Button size="sm" variant="outline" onClick={handleRedo} disabled={busy !== null}>
-          {busy === "redo" ? "Redoing…" : "Redo (re-run skill)"}
+          {busy === "redo" ? "Regenerating…" : "Regenerate prompt"}
         </Button>
       </div>
 

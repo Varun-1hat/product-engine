@@ -67,9 +67,9 @@ function seed(rateCard: FakeRow[]): FakeSupabaseClient {
       },
     ],
     scenes: [
-      { id: "scene-broll", reel_id: REEL_ID, position: 0, type: "broll", product_in_scene: false, seconds: 5, transition_to_next: "hard_cut", broll_provider_override: null, description: "b-roll" },
-      { id: "scene-avatar-long", reel_id: REEL_ID, position: 1, type: "avatar", product_in_scene: false, seconds: 15, transition_to_next: "hard_cut", broll_provider_override: null, description: "avatar long" },
-      { id: "scene-avatar-short", reel_id: REEL_ID, position: 2, type: "avatar", product_in_scene: false, seconds: 4, transition_to_next: null, broll_provider_override: null, description: "avatar short" },
+      { id: "scene-broll", reel_id: REEL_ID, position: 0, type: "broll", seconds: 5, transition_to_next: "hard_cut", broll_provider_override: null, description: "b-roll" },
+      { id: "scene-avatar-long", reel_id: REEL_ID, position: 1, type: "avatar", seconds: 15, transition_to_next: "hard_cut", broll_provider_override: null, description: "avatar long" },
+      { id: "scene-avatar-short", reel_id: REEL_ID, position: 2, type: "avatar", seconds: 4, transition_to_next: null, broll_provider_override: null, description: "avatar short" },
     ] as FakeRow[],
     rate_card: rateCard,
   });
@@ -171,7 +171,7 @@ describe("GET /api/reels/[reelId]/clip/estimate — Veo variant@resolution rate 
     //   - src/lib/cost/rateCard.ts's resolveRateFromRows() requires an EXACT
     //     string match on `variant`, so "fast" never matched "fast@1080p".
     // The Coder has since composed `${veo_variant}@${resolution}` in those
-    // three files (plus a related fix in worker/outro.ts) — see
+    // three files (plus a related fix in src/lib/jobs/outro.ts) — see
     // .pipeline/test-results.md for the full history. The assertions below
     // now pass and this test stays as a regression guard.
     seed([

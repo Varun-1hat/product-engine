@@ -1,5 +1,5 @@
 /**
- * worker/reconcile.ts — polls awaiting_provider jobs (HeyGen fallback,
+ * src/lib/jobs/reconcile.ts — polls awaiting_provider jobs (HeyGen fallback,
  * Veo, Higgsfield — spec §7 Stage 5/7, brief §10.19). Claims via
  * jobs.claimAwaitingProvider (SKIP LOCKED), calls adapter.poll(), and on
  * completion logs cost + persists the asset_version. On failure, marks the
@@ -129,10 +129,9 @@ export async function reconcileJob(deps: {
     // N1: on any caught error here (429/5xx from the provider, a Storage
     // upload failure, a DB hiccup), treat it as TRANSIENT by default and
     // re-arm for another poll rather than routing through jobs.fail()'s
-    // default retry, which moves the job to 'queued' — a status
-    // worker/index.ts's main claim loop treats as fatal for this job type
-    // ("reached the main claim loop unexpectedly"), since broll_gen/
-    // avatar_gen/outro_gen never pass through it. Deliberately do NOT log a
+    // default retry, which moves the job to 'queued' — a status nothing
+    // picks up, since broll_gen/avatar_gen/outro_gen never pass through the
+    // inline dispatcher (src/lib/jobs/run.ts). Deliberately do NOT log a
     // failed_unbilled cost_log row under the generation's real
     // idempotency_key here — that key is the double-charge guard for this
     // generation's eventual real (billed or terminal-unbilled) outcome, and

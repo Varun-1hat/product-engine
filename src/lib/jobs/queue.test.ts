@@ -5,8 +5,8 @@
  * handler that JSON's a redoAsset() return value verbatim) and retryLater()
  * (re-arm an awaiting_provider job for another poll attempt WITHOUT routing
  * through fail()'s default retry-to-'queued' behavior — see
- * worker/reconcile.test.ts for the higher-level integration coverage of how
- * worker/reconcile.ts actually uses this). Also covers fail()'s existing
+ * src/lib/jobs/reconcile.test.ts for the higher-level integration coverage of how
+ * src/lib/jobs/reconcile.ts actually uses this). Also covers fail()'s existing
  * retry-vs-terminal branching for contrast, since retryLater's docstring
  * explicitly exists to avoid it for awaiting_provider jobs.
  */

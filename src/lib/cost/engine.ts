@@ -2,9 +2,9 @@
  * Cost engine (§4) — cross-cutting. Every adapter generate/redo/poll and
  * every billed failure gets logged here; estimates are per-scene (R2) using
  * the scene's effective model, priced via rate_card with NO provider call.
- * Server/worker-only by code-organization convention (see
+ * Server-only by code-organization convention (see
  * src/lib/supabase/service.ts for why `server-only` is not used here —
- * this module must also run under Vitest and the tsx-run worker).
+ * this module must also run under Vitest).
  */
 import type { ServiceClient } from "@/src/lib/supabase/service";
 import type { Category, StageId, CallType, CallStatus, Provider } from "@/src/lib/db/enums";

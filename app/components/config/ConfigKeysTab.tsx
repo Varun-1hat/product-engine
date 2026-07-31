@@ -31,6 +31,7 @@ export function ConfigKeysTab({ clientId }: { clientId: string }) {
   const [heygenKey, setHeygenKey] = useState("");
   const [googleKey, setGoogleKey] = useState("");
   const [elevenLabsKey, setElevenLabsKey] = useState("");
+  const [anthropicKey, setAnthropicKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,6 +49,7 @@ export function ConfigKeysTab({ clientId }: { clientId: string }) {
         ...(googleKey ? [{ provider: "veo" as const, api_key: googleKey }] : []),
         ...(heygenKey ? [{ provider: "heygen" as const, api_key: heygenKey }] : []),
         ...(elevenLabsKey ? [{ provider: "elevenlabs" as const, api_key: elevenLabsKey }] : []),
+        ...(anthropicKey ? [{ provider: "anthropic" as const, api_key: anthropicKey }] : []),
       ];
       const res = await fetch(`/api/clients/${clientId}`, {
         method: "PATCH",
@@ -59,6 +61,7 @@ export function ConfigKeysTab({ clientId }: { clientId: string }) {
       setHeygenKey("");
       setGoogleKey("");
       setElevenLabsKey("");
+      setAnthropicKey("");
       await reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -114,6 +117,17 @@ export function ConfigKeysTab({ clientId }: { clientId: string }) {
               value={elevenLabsKey}
               onChange={(e) => setElevenLabsKey(e.target.value)}
               placeholder="leave blank to keep existing"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="anthropic_key">Anthropic key (orchestrator LLM — falls back to the agency key)</Label>
+            {currentLabel("anthropic")}
+            <Input
+              id="anthropic_key"
+              type="password"
+              value={anthropicKey}
+              onChange={(e) => setAnthropicKey(e.target.value)}
+              placeholder="leave blank to use the agency key"
             />
           </div>
           <Button type="submit" disabled={saving} className="w-fit">

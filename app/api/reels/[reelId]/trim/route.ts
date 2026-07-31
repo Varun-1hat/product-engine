@@ -12,13 +12,14 @@
  * (clip) created (scenes.clip_asset_id) — so this keys slots off that
  * column instead of a trim-specific one, and (unlike image's slots) also
  * surfaces `duration_s` off the current version's metadata, since the trim
- * page needs it to bound its start_s/end_s sliders (worker/trim.ts persists
+ * page needs it to bound its start_s/end_s sliders (src/lib/jobs/trim.ts persists
  * metadata.duration_s on every version, trimmed or not) and there's no
  * other route that exposes it. No `prompt` field — trim has none.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { buildStageContext } from "@/src/lib/context";
 import { trimStage, computeTrimHints } from "@/src/stages/trim";
+import { reconcilePendingJobs } from "@/src/lib/jobs/run";
 import { assetHistory, getAsset } from "@/src/lib/versioning";
 import type { StageContext } from "@/src/stages/types";
 import type { SceneRow } from "@/src/lib/db/types";
@@ -63,6 +64,9 @@ async function buildTrimSlotDetail(ctx: StageContext, assetId: string): Promise<
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ reelId: string }> }) {
   const { reelId } = await params;
   const ctx = await buildStageContext(reelId);
+  // Stage 5 clips may still be awaiting_provider — finish any the provider
+  // has completed before reading them (src/lib/jobs/run.ts). Never throws.
+  await reconcilePendingJobs(ctx);
   const [state, hints] = await Promise.all([trimStage.load(ctx), computeTrimHints(ctx)]);
   const scenes = (state.data as { scenes: SceneRow[] }).scenes;
 

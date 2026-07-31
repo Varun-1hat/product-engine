@@ -26,7 +26,7 @@ interface TrimSlotDetail {
   media_type: string;
   current_version_id: string | null;
   current_version_no: number;
-  /** Current version's persisted clip length (worker/trim.ts keeps this current after every trim) — bounds the sliders below. */
+  /** Current version's persisted clip length (src/lib/jobs/trim.ts keeps this current after every trim) — bounds the sliders below. */
   duration_s: number | null;
   preview_url: string | null;
   history: VersionSummary[];

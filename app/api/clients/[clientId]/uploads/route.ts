@@ -1,6 +1,6 @@
 /**
- * Generic client-scoped file upload (spec §7.1) — logo / product-photo /
- * music / end-frame uploads all funnel through this one endpoint so every
+ * Generic client-scoped file upload (spec §7.1) — logo / music /
+ * end-frame uploads all funnel through this one endpoint so every
  * caller (ConfigBrandTab's logo, Outro's custom end-frame, Music's track)
  * shares the same multipart parsing + path-building instead of each owning
  * its own. Bucket + path come from the *existing* helpers in
@@ -13,7 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { buildConfigContext } from "@/src/lib/context";
 import { buildClientPath, buildGeneratedPath, type BucketName } from "@/src/lib/storage";
 
-const UPLOAD_KINDS = ["logo", "product_photo", "music", "end_frame", "asset"] as const;
+const UPLOAD_KINDS = ["logo", "music", "end_frame", "asset"] as const;
 type UploadKind = (typeof UPLOAD_KINDS)[number];
 
 function isUploadKind(value: FormDataEntryValue | null): value is UploadKind {
@@ -62,10 +62,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ cli
     case "logo":
       bucket = "brand";
       path = buildClientPath({ client_id: clientId, category: "logo", file_id: randomUUID(), ext });
-      break;
-    case "product_photo":
-      bucket = "products";
-      path = buildClientPath({ client_id: clientId, category: "products", file_id: randomUUID(), ext });
       break;
     case "music":
       bucket = "music";

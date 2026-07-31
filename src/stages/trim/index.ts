@@ -4,7 +4,7 @@
  * trimming below the end frame) may break the continuous seam — hint only,
  * blocks nothing. Cost: none.
  *
- * Trim: enqueues a `trim` worker job (worker/trim.ts re-encodes the current
+ * Trim: runs a `trim` job inline (src/lib/jobs/trim.ts re-encodes the current
  * version -> a new `derived` asset_version with metadata.trim +
  * base_version_id). Veo clips are generated at native duration (~8s) —
  * trimming to the shorter scene.seconds happens here.
@@ -20,6 +20,7 @@ import { z } from "zod";
 import type { StageContext, StageModule, StageState, ReviewHooks } from "../types";
 import { nextStage } from "../types";
 import { toPublicJob } from "@/src/lib/jobs/queue";
+import { runJobInline } from "@/src/lib/jobs/run";
 import type { Job } from "@/src/lib/jobs/queue";
 import { effectiveBoundary, supportsEndFrameLookupFor } from "@/src/lib/routing";
 import { getReelConfig, getScenesForReel } from "@/src/lib/rows";
@@ -86,7 +87,7 @@ async function process(input: TrimInput, ctx: StageContext): Promise<TrimOutput>
     },
   });
 
-  return { job };
+  return { job: await runJobInline(ctx, job) };
 }
 
 /** Reorder = plain UPDATE scenes.position (brief §10.6 — human-managed, not enforced). */
@@ -147,7 +148,7 @@ export function createTrimReviewHooks(ctx: StageContext): ReviewHooks {
       });
       // Never pass through the raw job row (callback_token/payload) to a
       // route handler that JSON's this return value verbatim (BLOCK-2).
-      return { job: toPublicJob(job) };
+      return { job: toPublicJob(await runJobInline(ctx, job)) };
     },
     async revertPrompt() {
       throw new Error("trim has no prompts to revert");

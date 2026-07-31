@@ -101,8 +101,8 @@ export function ConfigAvatarsTab({ clientId }: { clientId: string }) {
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         {data && data.avatars.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            None pulled yet — save a HeyGen key in the Keys tab, then refresh in a few seconds (avatar_pull runs in
-            the worker).
+            None pulled yet — save a HeyGen key in the Keys tab, then refresh (the avatar pull runs while the key
+            is being saved).
           </p>
         ) : null}
 

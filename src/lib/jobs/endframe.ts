@@ -1,13 +1,13 @@
 /**
- * worker/endframe.ts — Stage 7 branded end-frame render (job_type_t
+ * src/lib/jobs/endframe.ts — Stage 7 branded end-frame render (job_type_t
  * 'endframe_render', spec §7 Stage 7, Assumption 5). Deterministic
  * HTML/CSS -> satori -> @resvg/resvg-js PNG. No AI generation.
  *
  * Fonts: satori requires at least one real font file to shape text. This
  * build bundles Noto Sans (Apache/SIL-OFL, the same font Next.js's own
- * @vercel/og ships) as the working default at worker/assets/fonts —
+ * @vercel/og ships) as the working default at src/lib/jobs/assets/fonts —
  * copied into this repo rather than read out of next's internal dist path
- * so the worker doesn't depend on Next's internals. "Brand fonts honored"
+ * so this doesn't depend on Next's internals. "Brand fonts honored"
  * (Assumption 5) is a seam: client_config.fonts can carry a brand font
  * reference to fetch/embed here later — swapping the `fonts` array below
  * is the only change needed; no other code changes.
@@ -21,7 +21,6 @@ import type { StorageClient } from "@/src/lib/storage";
 import { dimensionsFor } from "@/src/adapters/dimensions";
 import { getAsset, upsertAssetVersion } from "@/src/lib/versioning";
 import type { Job } from "@/src/lib/jobs/queue";
-import { fileURLToPath } from "node:url";
 
 export interface EndframeRenderPayload {
   tagline: string | null;
@@ -34,9 +33,11 @@ interface BrandColors {
 }
 
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const DEFAULT_FONT_PATH = path.join(__dirname, "assets", "fonts", "NotoSans-Regular.ttf");
+// Resolved from the project root rather than import.meta.url: this module now
+// runs inside the Next server bundle, where the emitted file layout doesn't
+// mirror the source tree. next.config.ts's outputFileTracingIncludes keeps the
+// .ttf next to the build.
+const DEFAULT_FONT_PATH = path.join(process.cwd(), "src", "lib", "jobs", "assets", "fonts", "NotoSans-Regular.ttf");
 let cachedFontData: Buffer | null = null;
 
 async function loadDefaultFont(): Promise<Buffer> {
@@ -50,7 +51,7 @@ async function loadDefaultFont(): Promise<Buffer> {
  * satori accepts plain object literals shaped like React elements at
  * runtime (no JSX/React needed) — its .d.ts types the param as `ReactNode`
  * though, so this helper's return value is cast at the call site rather
- * than pulling a JSX toolchain into a plain .ts worker file.
+ * than pulling a JSX toolchain into a plain .ts module.
  */
 function buildEndFrameNode(params: {
   height: number;

@@ -28,7 +28,7 @@ interface ReelsResponse {
 /**
  * Client dashboard (spec §2.3) — reel list + spend + actions. Replaces the
  * deleted app/(app)/dashboard page's ClientReels logic (ported below) plus
- * this page's own former brand-kit/keys/avatars/products forms, which now
+ * this page's own former brand-kit/keys/avatars forms, which now
  * live under Config (§2.4).
  */
 export default function ClientDashboardPage({ params }: { params: Promise<{ clientId: string }> }) {

@@ -5,7 +5,6 @@ import Link from "next/link";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { ConfigBrandTab } from "@/app/components/config/ConfigBrandTab";
 import { ConfigKeysTab } from "@/app/components/config/ConfigKeysTab";
-import { ConfigProductsTab } from "@/app/components/config/ConfigProductsTab";
 import { ConfigAvatarsTab } from "@/app/components/config/ConfigAvatarsTab";
 import { useApiResource } from "@/app/hooks/useApiResource";
 import { routes } from "@/src/lib/routes";
@@ -39,7 +38,6 @@ export default function ClientConfigPage({ params }: { params: Promise<{ clientI
         <TabsList>
           <TabsTrigger value="brand">Brand</TabsTrigger>
           <TabsTrigger value="keys">Keys</TabsTrigger>
-          <TabsTrigger value="products">Products</TabsTrigger>
           <TabsTrigger value="avatars">Avatars</TabsTrigger>
         </TabsList>
         <TabsContent value="brand">
@@ -47,9 +45,6 @@ export default function ClientConfigPage({ params }: { params: Promise<{ clientI
         </TabsContent>
         <TabsContent value="keys">
           <ConfigKeysTab clientId={clientId} />
-        </TabsContent>
-        <TabsContent value="products">
-          <ConfigProductsTab clientId={clientId} />
         </TabsContent>
         <TabsContent value="avatars">
           <ConfigAvatarsTab clientId={clientId} />

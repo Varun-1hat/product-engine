@@ -13,18 +13,19 @@
  * Process: upsert clients+client_config; keys -> vault.create_secret ->
  * provider_keys (Google key covers Nano Banana + Veo — see
  * src/lib/crypto/vault.ts); HeyGen key -> enqueue an `avatar_pull` job
- * (worker/index.ts pulls looks -> upserts avatars). Clone copies brand kit,
- * defaults, products/media, avatar selections — never provider keys
+ * (src/lib/jobs/run.ts pulls looks -> upserts avatars). Clone copies brand kit,
+ * defaults, avatar selections — never provider keys
  * (brief §16). Cost: avatar-pull is not billed.
  */
 import { z } from "zod";
 import type { ServiceClient } from "@/src/lib/supabase/service";
 import type { JobQueue } from "@/src/lib/jobs/queue";
+import { runJobInline } from "@/src/lib/jobs/run";
 import type { StorageClient } from "@/src/lib/storage";
 import type { KeyResolver } from "@/src/lib/crypto/vault";
 import { createSecret } from "@/src/lib/crypto/vault";
 import { ASPECT_RATIOS, RESOLUTIONS, PROVIDERS, type Provider } from "@/src/lib/db/enums";
-import type { AvatarRow, Client, ClientConfigRow, ProductRow } from "@/src/lib/db/types";
+import type { AvatarRow, Client, ClientConfigRow } from "@/src/lib/db/types";
 
 export interface ConfigStageContext {
   clientId: string;
@@ -50,11 +51,6 @@ const providerKeyInputSchema = z.object({
   account_label: z.string().optional(),
 });
 
-const productInputSchema = z.object({
-  name: z.string().min(1),
-  product_link: z.string().optional(),
-});
-
 export const configInputSchema = z.object({
   /** Existing client to update; omit (with clone_from unset) to create a brand-new client. */
   client_id: z.string().uuid().optional(),
@@ -63,7 +59,6 @@ export const configInputSchema = z.object({
   display_name: z.string().min(1).optional(),
   brand_kit: brandKitSchema.optional(),
   provider_keys: z.array(providerKeyInputSchema).optional(),
-  products: z.array(productInputSchema).optional(),
 });
 export type ConfigInput = z.infer<typeof configInputSchema>;
 
@@ -78,7 +73,6 @@ export interface ConfigOutput {
   client: Client;
   client_config: ClientConfigRow;
   avatars: AvatarRow[];
-  products: ProductRow[];
   provider_keys: MaskedProviderKey[];
 }
 
@@ -152,24 +146,24 @@ async function handleProviderKeys(ctx: ConfigStageContext, clientId: string, key
     }
 
     if (entry.provider === "heygen") {
-      // Async avatar pull (job_type_t 'avatar_pull' — client-level, no reel
-      // yet, hence jobs.reel_id is nullable). worker/index.ts processes it.
-      await ctx.jobs.enqueue({
+      // Avatar pull (job_type_t 'avatar_pull' — client-level, no reel yet,
+      // hence jobs.reel_id is nullable). Runs inline (src/lib/jobs/run.ts).
+      const job = await ctx.jobs.enqueue({
         reel_id: null,
         type: "avatar_pull",
         provider: "heygen",
         payload: { client_id: clientId },
       });
+      // Swallowed deliberately: the key itself is already committed above, so
+      // letting a HeyGen error (bad key, 429, outage) escape would fail the
+      // whole config save AFTER the write — reporting failure for a save that
+      // actually happened, and skipping the rest of processConfig. The old
+      // enqueue-only path could never fail here; this preserves that. The
+      // error is recorded on the job row by runJobInline, and the Avatars tab
+      // empty state already tells the user to save the key again.
+      await runJobInline(ctx, job).catch(() => {});
     }
   }
-}
-
-async function insertProducts(supa: ServiceClient, clientId: string, products: ConfigInput["products"]) {
-  if (!products || products.length === 0) return;
-  const { error } = await supa
-    .from("products")
-    .insert(products.map((p) => ({ client_id: clientId, name: p.name, product_link: p.product_link ?? null })));
-  if (error) throw new Error(`products insert failed: ${error.message}`);
 }
 
 async function cloneClient(supa: ServiceClient, fromClientId: string, displayName: string): Promise<string> {
@@ -206,25 +200,6 @@ async function cloneClient(supa: ServiceClient, fromClientId: string, displayNam
     );
   }
 
-  const { data: sourceProducts } = await supa.from("products").select("*").eq("client_id", fromClientId);
-  for (const product of (sourceProducts ?? []) as ProductRow[]) {
-    const { data: newProduct } = await supa
-      .from("products")
-      .insert({ client_id: newClientId, name: product.name, product_link: product.product_link })
-      .select("*")
-      .single();
-    if (newProduct) {
-      const { data: media } = await supa.from("product_media").select("*").eq("product_id", product.id);
-      for (const m of media ?? []) {
-        await supa.from("product_media").insert({
-          product_id: (newProduct as ProductRow).id,
-          media_type: (m as { media_type: string }).media_type,
-          storage_path: (m as { storage_path: string }).storage_path,
-        });
-      }
-    }
-  }
-
   const { data: sourceAvatars } = await supa.from("avatars").select("*").eq("client_id", fromClientId);
   for (const avatar of (sourceAvatars ?? []) as AvatarRow[]) {
     await supa.from("avatars").insert({
@@ -246,10 +221,9 @@ export async function loadConfig(ctx: ConfigStageContext): Promise<ConfigOutput 
   if (error) throw new Error(`clients lookup failed: ${error.message}`);
   if (!client) return null;
 
-  const [{ data: clientConfig }, { data: avatars }, { data: products }, { data: keyRows }] = await Promise.all([
+  const [{ data: clientConfig }, { data: avatars }, { data: keyRows }] = await Promise.all([
     ctx.supa.from("client_config").select("*").eq("client_id", ctx.clientId).maybeSingle(),
     ctx.supa.from("avatars").select("*").eq("client_id", ctx.clientId).order("created_at", { ascending: true }),
-    ctx.supa.from("products").select("*").eq("client_id", ctx.clientId).order("created_at", { ascending: true }),
     ctx.supa.from("provider_keys").select("provider, vault_secret_id, account_label").eq("client_id", ctx.clientId),
   ]);
 
@@ -271,7 +245,6 @@ export async function loadConfig(ctx: ConfigStageContext): Promise<ConfigOutput 
     client: client as Client,
     client_config: (clientConfig as ClientConfigRow) ?? { client_id: ctx.clientId } as ClientConfigRow,
     avatars: (avatars ?? []) as AvatarRow[],
-    products: (products ?? []) as ProductRow[],
     provider_keys,
   };
 }
@@ -298,7 +271,6 @@ export async function processConfig(ctx: ConfigStageContext, input: ConfigInput)
 
   await upsertClientConfig(scopedCtx.supa, clientId, input.brand_kit);
   await handleProviderKeys(scopedCtx, clientId, input.provider_keys);
-  await insertProducts(scopedCtx.supa, clientId, input.products);
 
   const result = await loadConfig(scopedCtx);
   if (!result) throw new Error(`config: client ${clientId} not found after processing`);

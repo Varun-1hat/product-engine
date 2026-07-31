@@ -2,7 +2,7 @@
  * middleware.ts (BLOCK-1, session-auth gate — .pipeline/spec.md item 1) is
  * new this phase and had zero test coverage. It lives at the repo root
  * (alongside next.config.ts), so it's listed explicitly in vitest.config.ts's
- * `include` rather than falling under src/**, worker/**, or app/**.
+ * `include` rather than falling under src/**, src/lib/jobs/**, or app/**.
  *
  * Mocks ONLY @supabase/ssr's createServerClient — the one SDK boundary
  * middleware.ts talks to — with a controllable fake whose auth.getUser() we

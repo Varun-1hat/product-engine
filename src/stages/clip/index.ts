@@ -5,7 +5,7 @@
  *
  * Routes by scene.type: b-roll -> getAdapter('video_broll', effectiveModel)
  * (start(+end only if supports_end_frame) -> clip); avatar (silent) ->
- * getAdapter('video_avatar','heygen') (prompt+look(+product refs) -> clip,
+ * getAdapter('video_avatar','heygen') (prompt+look -> clip,
  * no Nano Banana composite). Motion/shot prompts (broll_motion/avatar_shot)
  * have no dedicated generation skill in §5 — this build derives the
  * initial prompt via brandStyleLock(scene.description, brand), giving that
@@ -17,7 +17,7 @@
  * and returns immediately — "enqueue all scene jobs (parallel)". Cost is
  * NOT logged here: generate() returning 'pending' doesn't yet know
  * success/failure, so costEngine.log() happens at completion time in
- * worker/reconcile.ts (poll) or app/api/webhooks/heygen/route.ts (webhook),
+ * src/lib/jobs/reconcile.ts (poll) or app/api/webhooks/heygen/route.ts (webhook),
  * which read the billing context (units/unit_type/variant/call_type) back
  * out of `jobs.payload` — see those files' header notes for why (mirrors
  * the same contract-shape gap documented in the Veo/HeyGen adapters).
@@ -26,10 +26,12 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { StageContext, StageModule, StageState, ReviewHooks, CostEstimate } from "../types";
 import { nextStage } from "../types";
-import { effectiveBrollModel } from "@/src/lib/routing";
+import { effectiveBrollModel, needsEndImage, supportsEndFrameLookupFor } from "@/src/lib/routing";
+import { reelModelContext } from "@/src/lib/modelConstraints";
 import { getReelConfig, getScene, getScenesForReel } from "@/src/lib/rows";
-import { getBrandContext, getProductsWithPhotos, guessMimeFromExt } from "@/src/lib/brandContext";
+import { getBrandContext, guessMimeFromExt } from "@/src/lib/brandContext";
 import { buildAssetRefFromAssetId, buildAssetRefFromStoragePath } from "@/src/lib/assetRefs";
+import { productRefPaths } from "@/src/lib/productRefs";
 import {
   assetHistory,
   getAsset,
@@ -42,6 +44,7 @@ import {
 import { createUploadedAsset, uploadAssetVersion } from "@/src/lib/assetUpload";
 import { heygenCallbackUrl } from "@/src/adapters/config";
 import { composeVeoVariant } from "@/src/adapters/video_broll/veo";
+import { promptStaleness, targetModelFor, type TargetModel } from "@/src/skills/model-prompt/guidance";
 import type { AssetRow, AvatarRow, PromptRow, ReelConfigRow, SceneRow } from "@/src/lib/db/types";
 import type { AssetRef, GenerateInput } from "@/src/adapters/types";
 import { toPublicJob } from "@/src/lib/jobs/queue";
@@ -72,41 +75,130 @@ export interface ClipOutput {
 
 async function load(ctx: StageContext): Promise<StageState> {
   const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
-  return { stage: "clip", data: { scenes } };
+  const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
+
+  // Per scene: is the stored prompt still written for the model that will run
+  // it? Advisory only — redoPrompt() is the "re-optimise" action, and doing
+  // nothing is a valid choice, so nothing is rewritten here.
+  const prompt_staleness = Object.fromEntries(
+    await Promise.all(
+      scenes.map(async (scene) => {
+        const kind: PromptKind = scene.type === "broll" ? "broll_motion" : "avatar_shot";
+        const stored = await getStoredTargetModel(ctx, scene.id, kind);
+        return [scene.id, promptStaleness(stored, targetModelForScene(scene, reelConfig))] as const;
+      })
+    )
+  );
+
+  return { stage: "clip", data: { scenes, prompt_staleness } };
+}
+
+/** Reads back which model a scene's stored prompt was optimised for. */
+async function getStoredTargetModel(ctx: StageContext, sceneId: string, kind: PromptKind): Promise<string | null> {
+  const { data, error } = await ctx.supa.from("prompts").select("id").eq("scene_id", sceneId).eq("kind", kind).maybeSingle();
+  if (error) throw new Error(`prompts lookup failed: ${error.message}`);
+  if (!data) return null;
+  const current = await getCurrentPromptVersion(ctx.supa, (data as { id: string }).id);
+  const metadata = current?.metadata as { target_model?: string } | null | undefined;
+  return metadata?.target_model ?? null;
 }
 
 async function getMotionPrompt(
   ctx: StageContext,
   sceneId: string,
   kind: PromptKind
-): Promise<{ promptId: string; promptVersionId: string; text: string } | null> {
+): Promise<{ promptId: string; promptVersionId: string; text: string; reference_paths: string[] } | null> {
   const { data, error } = await ctx.supa.from("prompts").select("*").eq("scene_id", sceneId).eq("kind", kind).maybeSingle();
   if (error) throw new Error(`prompts lookup failed: ${error.message}`);
   if (!data) return null;
   const promptRow = data as PromptRow;
   const current = await getCurrentPromptVersion(ctx.supa, promptRow.id);
   if (!current) return null;
-  return { promptId: promptRow.id, promptVersionId: current.id, text: current.text };
+  return {
+    promptId: promptRow.id,
+    promptVersionId: current.id,
+    text: current.text,
+    reference_paths: current.reference_paths ?? [],
+  };
+}
+
+/**
+ * Resolves the model this scene's clip will actually be generated by, so the
+ * prompt is written for that model. Must use the per-scene override, not the
+ * reel default — a scene flipped to higgsfield needs higgsfield's prompt rules.
+ */
+function targetModelForScene(scene: SceneRow, reelConfig: ReelConfigRow): TargetModel | null {
+  if (scene.type !== "broll") return targetModelFor("heygen");
+  const model = effectiveBrollModel(scene, reelConfig);
+  return model ? targetModelFor(model, reelConfig.veo_variant ?? undefined) : null;
+}
+
+/**
+ * Whether this scene's clip call will actually carry a last frame — the same
+ * capability-driven answer Stage 4 uses to decide whether to generate an end
+ * image at all, so the prompt is written for the mode the clip really runs in
+ * (interpolation vs start-frame-only) rather than for the user's stored intent.
+ */
+function sceneUsesEndFrame(ctx: StageContext, scene: SceneRow, reelConfig: ReelConfigRow): boolean {
+  return needsEndImage(scene, reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
 }
 
 async function ensureMotionPrompt(
   ctx: StageContext,
   scene: SceneRow,
   kind: PromptKind,
-  brand: BrandContext
-): Promise<{ promptId: string; promptVersionId: string; text: string }> {
+  brand: BrandContext,
+  target: TargetModel | null,
+  reelConfig: ReelConfigRow
+): Promise<{ promptId: string; promptVersionId: string; text: string; reference_paths: string[] }> {
   const existing = await getMotionPrompt(ctx, scene.id, kind);
   if (existing) return existing;
 
-  const text = await ctx.skills.brandStyleLock(scene.description ?? "", brand);
+  const text = await ctx.skills.brandStyleLock(
+    scene.description ?? "",
+    brand,
+    undefined,
+    target ?? undefined,
+    // Resolved per scene, not per reel: whether this clip interpolates decides
+    // both the length it renders at and whether the shot may describe a landing
+    // composition at all.
+    reelModelContext(reelConfig, { uses_end_frames: sceneUsesEndFrame(ctx, scene, reelConfig) })
+  );
   const { prompt, version } = await upsertPromptVersion(ctx.supa, {
     reel_id: ctx.reelId,
     scene_id: scene.id,
     kind,
     text,
     source: "skill",
+    // Stamps which model this text was optimised for; the review UI compares it
+    // against the scene's current model and offers a re-run when they diverge.
+    metadata: target ? { target_model: target.id, target_model_label: target.label } : null,
   });
-  return { promptId: prompt.id, promptVersionId: version.id, text: version.text };
+  return { promptId: prompt.id, promptVersionId: version.id, text: version.text, reference_paths: [] };
+}
+
+/**
+ * The reference images for one clip call: the prompt's own stage-level
+ * uploads first, then the reel's product reference photos (unless this clip
+ * opted out), trimmed to whatever the adapter's image-reference cap leaves
+ * over after the start/end frames have taken their slots.
+ */
+async function buildClipReferences(
+  ctx: StageContext,
+  reelConfig: ReelConfigRow,
+  promptId: string,
+  stagePaths: string[],
+  maxReferenceImages: number | undefined,
+  framesUsed: number
+): Promise<AssetRef[]> {
+  const productPaths = await productRefPaths(ctx.supa, reelConfig, promptId);
+  const paths = [...stagePaths, ...productPaths];
+  const budget = maxReferenceImages == null ? paths.length : Math.max(0, maxReferenceImages - framesUsed);
+  return Promise.all(
+    paths
+      .slice(0, budget)
+      .map((path) => buildAssetRefFromStoragePath(ctx.storage, "assets", path, guessMimeFromExt(path)))
+  );
 }
 
 /**
@@ -118,8 +210,16 @@ async function ensureMotionPrompt(
 export async function ensureClipPrompts(ctx: StageContext): Promise<void> {
   const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
   const brand = await getBrandContext(ctx.supa, ctx.clientId);
+  const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
   for (const scene of scenes) {
-    await ensureMotionPrompt(ctx, scene, scene.type === "broll" ? "broll_motion" : "avatar_shot", brand);
+    await ensureMotionPrompt(
+      ctx,
+      scene,
+      scene.type === "broll" ? "broll_motion" : "avatar_shot",
+      brand,
+      targetModelForScene(scene, reelConfig),
+      reelConfig
+    );
   }
 }
 
@@ -222,13 +322,29 @@ async function generateClipForScene(
 
     const adapter = ctx.adapters.get("video_broll", model);
     const caps = adapter.capabilities(reelConfig.veo_variant);
-    const { promptId, text } = await ensureMotionPrompt(ctx, scene, "broll_motion", brand);
+    const { promptId, text, reference_paths } = await ensureMotionPrompt(
+      ctx,
+      scene,
+      "broll_motion",
+      brand,
+      targetModelFor(model, reelConfig.veo_variant ?? undefined),
+      reelConfig
+    );
 
     const startImage = await buildAssetRefFromAssetId(ctx.supa, ctx.storage, scene.start_image_id);
     const endImage =
       caps.supports_end_frame && scene.end_image_id
         ? await buildAssetRefFromAssetId(ctx.supa, ctx.storage, scene.end_image_id)
         : undefined;
+
+    const references = await buildClipReferences(
+      ctx,
+      reelConfig,
+      promptId,
+      reference_paths,
+      caps.max_reference_images,
+      1 + (endImage ? 1 : 0)
+    );
 
     const providerKey = await ctx.keys.forProvider(ctx.clientId, model as Provider);
     const generateInput: GenerateInput = {
@@ -238,6 +354,7 @@ async function generateClipForScene(
       prompt: text,
       start_image: startImage,
       end_image: endImage,
+      references: references.length > 0 ? references : undefined,
       aspect_ratio: reelConfig.aspect_ratio,
       resolution: reelConfig.resolution,
       duration_s: scene.seconds,
@@ -268,16 +385,24 @@ async function generateClipForScene(
   if (avatarError) throw new Error(`avatars lookup failed: ${avatarError.message}`);
   const avatar = avatarData as AvatarRow;
 
-  const { promptId, text } = await ensureMotionPrompt(ctx, scene, "avatar_shot", brand);
+  const { promptId, text, reference_paths } = await ensureMotionPrompt(
+    ctx,
+    scene,
+    "avatar_shot",
+    brand,
+    targetModelFor("heygen"),
+    reelConfig
+  );
 
-  let references: AssetRef[] = [];
-  if (scene.product_in_scene) {
-    const products = await getProductsWithPhotos(ctx.supa, ctx.clientId);
-    const photoPaths = products.flatMap((p) => p.photo_paths);
-    references = await Promise.all(
-      photoPaths.map((path) => buildAssetRefFromStoragePath(ctx.storage, "products", path, guessMimeFromExt(path)))
-    );
-  }
+  // avatar_ids take video slots, not image slots — the whole image budget is free.
+  const references = await buildClipReferences(
+    ctx,
+    reelConfig,
+    promptId,
+    reference_paths,
+    ctx.adapters.get("video_avatar", "heygen").capabilities().max_reference_images,
+    0
+  );
 
   const callbackToken = randomUUID();
   const providerKey = await ctx.keys.forProvider(ctx.clientId, "heygen");
@@ -409,7 +534,17 @@ export function createClipReviewHooks(ctx: StageContext): ReviewHooks {
       if (!promptRow.scene_id) throw new Error(`prompt ${promptId} has no associated scene`);
       const scene = await getScene(ctx.supa, promptRow.scene_id);
       const brand = await getBrandContext(ctx.supa, ctx.clientId);
-      const text = await ctx.skills.brandStyleLock(scene.description ?? "", brand);
+      // Reads the scene's CURRENT model, so a redo doubles as the
+      // "re-optimise for the model I switched to" action the UI offers.
+      const reelConfig = await getReelConfig(ctx.supa, promptRow.reel_id);
+      const target = targetModelForScene(scene, reelConfig);
+      const text = await ctx.skills.brandStyleLock(
+        scene.description ?? "",
+        brand,
+        undefined,
+        target ?? undefined,
+        reelModelContext(reelConfig, { uses_end_frames: sceneUsesEndFrame(ctx, scene, reelConfig) })
+      );
       const { version } = await upsertPromptVersion(ctx.supa, {
         promptId,
         reel_id: promptRow.reel_id,
@@ -418,6 +553,7 @@ export function createClipReviewHooks(ctx: StageContext): ReviewHooks {
         kind: promptRow.kind,
         text,
         source: "skill",
+        metadata: target ? { target_model: target.id, target_model_label: target.label } : null,
       });
       return version;
     },

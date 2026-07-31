@@ -66,7 +66,7 @@ export default function ClientsPage() {
 
   /**
    * Clone-from (spec §7.5) — creates a NEW client prefilled from an existing
-   * one's brand kit/products/avatars (never provider keys — src/stages/config's
+   * one's brand kit/avatars (never provider keys — src/stages/config's
    * cloneClient never copies those). Lives here, not Config, since cloning
    * creates a new client rather than editing the one you're viewing.
    * POST /api/clients already forwards `clone_from` through to processConfig

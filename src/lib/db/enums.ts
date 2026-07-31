@@ -6,8 +6,8 @@
  * arrays used for UI dropdowns / validation).
  */
 
-/** `anthropic` is the runtime-skills LLM — not user-selectable, but billed and logged like any other provider. */
-export const PROVIDERS = ["nano_banana", "veo", "higgsfield", "heygen", "elevenlabs", "lyria", "anthropic"] as const;
+/** `anthropic`/`gemini` are the runtime-skills orchestrating LLM (picked per reel in Stage 2), billed and logged like any other provider. */
+export const PROVIDERS = ["nano_banana", "veo", "higgsfield", "heygen", "elevenlabs", "lyria", "anthropic", "gemini"] as const;
 export type Provider = (typeof PROVIDERS)[number];
 
 export const CATEGORIES = ["image", "video_broll", "video_avatar", "tts", "music"] as const;

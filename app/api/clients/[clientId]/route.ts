@@ -1,6 +1,6 @@
 /**
  * Stage 1 (config) — get/update a single client (brand kit, provider keys,
- * products, avatar pull). Thin: delegates to src/stages/config.
+ * avatar pull). Thin: delegates to src/stages/config.
  *
  * GET is enriched beyond loadConfig()'s bare snapshot with a signed URL for
  * the brand logo (spec §7.5 — ConfigBrandTab needs a renderable URL, not the

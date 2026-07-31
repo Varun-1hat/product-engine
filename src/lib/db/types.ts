@@ -57,22 +57,6 @@ export interface AvatarRow {
   created_at: string;
 }
 
-export interface ProductRow {
-  id: string;
-  client_id: string;
-  name: string;
-  product_link: string | null;
-  created_at: string;
-}
-
-export interface ProductMediaRow {
-  id: string;
-  product_id: string;
-  media_type: MediaType;
-  storage_path: string;
-  created_at: string;
-}
-
 export interface Reel {
   id: string;
   client_id: string;
@@ -100,6 +84,8 @@ export interface ReelConfigRow {
   aspect_ratio: string;
   resolution: string;
   output_fps: number;
+  /** Per-reel orchestrating LLM for the runtime skills; null = the built-in default. */
+  orchestrator_model: string | null;
   end_frame_mode: EndFrameMode;
   end_frame_asset_id: string | null;
   outro_tagline: string | null;
@@ -108,6 +94,10 @@ export interface ReelConfigRow {
   music_trim: { start_s: number; end_s: number } | null;
   music_prompt: string | null;
   music_provider: Provider | null;
+  /** Which music model `music_prompt` was optimised for; null = hand-typed or pre-dates the skill. */
+  music_prompt_target_model: string | null;
+  /** Product reference photos for this reel — auto-attached to every gen-AI call (see src/lib/productRefs.ts). */
+  product_reference_paths: string[];
   updated_at: string;
 }
 
@@ -116,7 +106,6 @@ export interface SceneRow {
   reel_id: string;
   position: number;
   type: SceneType;
-  product_in_scene: boolean;
   seconds: number;
   transition_to_next: Boundary | null;
   broll_provider_override: Provider | null;
@@ -178,6 +167,8 @@ export interface PromptRow {
   asset_id: string | null;
   kind: PromptKind;
   current_version_id: string | null;
+  /** Per-asset opt-out for the reel's product reference photos (default on). */
+  use_product_refs: boolean;
   created_at: string;
   updated_at: string;
 }

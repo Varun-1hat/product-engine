@@ -1,5 +1,5 @@
 /**
- * worker/trim.ts — Stage 6 trim job handler (job_type_t 'trim', spec §7
+ * src/lib/jobs/trim.ts — Stage 6 trim job handler (job_type_t 'trim', spec §7
  * Stage 6). Re-encodes the current version of an asset to [start_s, end_s)
  * and creates a new `derived` asset_version (metadata.trim +
  * base_version_id) — Veo clips generated at native duration (~8s) get

@@ -98,7 +98,7 @@ describe("createHeygenAdapter", () => {
   // as reference videos. Before this fix, avatar_ids.length and videoRefCount
   // were only ever checked independently, so e.g. 2 avatars + 2 reference
   // videos (4 total "video-like" slots > max_reference_videos=3) was
-  // incorrectly allowed. worker/**-adjacent, flagged explicitly in
+  // incorrectly allowed. src/lib/jobs/**-adjacent, flagged explicitly in
   // .pipeline/changes.md as needing new test coverage since neither of the
   // two tests above exercises avatar_ids and video references together.
   describe("validate() — combined avatar + reference-video budget (max_reference_videos=3)", () => {

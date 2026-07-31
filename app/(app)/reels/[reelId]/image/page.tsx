@@ -15,7 +15,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/app/components/ui/alert-dialog";
-import { PromptReview, type ReferenceOption } from "@/app/components/PromptReview";
+import { PromptReview } from "@/app/components/PromptReview";
 import { AssetReview, type AssetReviewProps } from "@/app/components/AssetReview";
 import { UploadSlot } from "@/app/components/UploadSlot";
 import { CostEstimateBar, type EstimateLine } from "@/app/components/CostEstimateBar";
@@ -49,6 +49,7 @@ interface SlotDetail {
     version_no: number;
     history: VersionSummary[];
     reference_paths: string[];
+    use_product_refs: boolean;
   } | null;
 }
 
@@ -57,8 +58,6 @@ interface ImageStateResponse {
   slots: Record<string, { start?: SlotDetail; end?: SlotDetail }>;
   /** Per-scene start/end prompts, present even before the images are generated. */
   prompts: Record<string, { start: NonNullable<SlotDetail["prompt"]> | null; end: NonNullable<SlotDetail["prompt"]> | null }>;
-  /** Product photos offered as prompt references. */
-  product_photos: ReferenceOption[];
   estimate: { total_usd: number | null; rate_missing: boolean; lines: EstimateLine[] };
 }
 
@@ -255,7 +254,10 @@ export default function ImageStagePage({ params }: { params: Promise<{ reelId: s
                     currentVersionNo={startPrompt.version_no}
                     history={startPrompt.history}
                     currentRefs={startPrompt.reference_paths}
-                    referenceOptions={state.product_photos}
+                    promptsEndpoint={`/api/reels/${reelId}/image/prompts`}
+                    useProductRefs={startPrompt.use_product_refs}
+                    clientId={clientId}
+                    reelId={reelId}
                     onChanged={load}
                   />
                 ) : (
@@ -307,7 +309,10 @@ export default function ImageStagePage({ params }: { params: Promise<{ reelId: s
                     currentVersionNo={endPrompt.version_no}
                     history={endPrompt.history}
                     currentRefs={endPrompt.reference_paths}
-                    referenceOptions={state.product_photos}
+                    promptsEndpoint={`/api/reels/${reelId}/image/prompts`}
+                    useProductRefs={endPrompt.use_product_refs}
+                    clientId={clientId}
+                    reelId={reelId}
                     onChanged={load}
                   />
                 ) : null}

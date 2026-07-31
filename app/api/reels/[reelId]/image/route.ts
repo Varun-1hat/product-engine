@@ -15,7 +15,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { buildStageContext } from "@/src/lib/context";
 import { imageStage } from "@/src/stages/image";
 import { assetHistory, getAsset, getCurrentPromptVersion, promptHistory } from "@/src/lib/versioning";
-import { getProductsWithPhotos } from "@/src/lib/brandContext";
 import type { StageContext } from "@/src/stages/types";
 import type { SceneRow } from "@/src/lib/db/types";
 
@@ -38,16 +37,11 @@ interface SlotDetail {
     text: string;
     version_no: number;
     history: VersionSummary[];
-    /** Product photos attached to this prompt as generation references. */
+    /** Reference images attached to this prompt for the generation call. */
     reference_paths: string[];
+    /** Per-image opt-out of the reel's product reference photos. */
+    use_product_refs: boolean;
   } | null;
-}
-
-/** A product photo the user can attach to any image prompt as a reference. */
-interface ProductPhotoOption {
-  path: string;
-  url: string | null;
-  product_name: string;
 }
 
 type PromptDetail = NonNullable<SlotDetail["prompt"]>;
@@ -55,31 +49,15 @@ type PromptDetail = NonNullable<SlotDetail["prompt"]>;
 async function buildPromptDetail(ctx: StageContext, promptId: string): Promise<PromptDetail | null> {
   const [current, history] = await Promise.all([getCurrentPromptVersion(ctx.supa, promptId), promptHistory(ctx.supa, promptId)]);
   if (!current) return null;
+  const { data: row } = await ctx.supa.from("prompts").select("use_product_refs").eq("id", promptId).maybeSingle();
   return {
     id: promptId,
     text: current.text,
     version_no: current.version_no,
     history: history.map((h) => ({ id: h.id, version_no: h.version_no, created_at: h.created_at })),
     reference_paths: current.reference_paths ?? [],
+    use_product_refs: (row as { use_product_refs: boolean } | null)?.use_product_refs ?? true,
   };
-}
-
-/**
- * Every product photo on this client, with a signed preview URL — the pool
- * the page offers for attaching to a prompt. Paths are `products`-bucket
- * paths, which is exactly what generateAndPersistImage downloads references
- * from, so an attached path flows straight through to the provider call.
- */
-async function productPhotoOptions(ctx: StageContext): Promise<ProductPhotoOption[]> {
-  const products = await getProductsWithPhotos(ctx.supa, ctx.clientId);
-  const options: ProductPhotoOption[] = [];
-  for (const product of products) {
-    for (const path of product.photo_paths) {
-      const url = await ctx.storage.signedUrl("products", path).catch(() => null);
-      options.push({ path, url, product_name: product.name });
-    }
-  }
-  return options;
 }
 
 /**
@@ -137,9 +115,8 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ ree
   }
 
   const estimate = await imageStage.estimate!({}, ctx);
-  const product_photos = await productPhotoOptions(ctx);
 
-  return NextResponse.json({ scenes, slots, prompts, product_photos, estimate });
+  return NextResponse.json({ scenes, slots, prompts, estimate });
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ reelId: string }> }) {

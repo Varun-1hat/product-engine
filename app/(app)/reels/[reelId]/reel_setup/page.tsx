@@ -12,9 +12,16 @@ import { Slider } from "@/app/components/ui/slider";
 import { Switch } from "@/app/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select";
 import { CapabilityGuard } from "@/app/components/CapabilityGuard";
+import { ModelConstraintsPanel } from "@/app/components/ModelConstraintsPanel";
+import { reelConstraintSets } from "@/src/lib/modelConstraints";
 import { useApiResource } from "@/app/hooks/useApiResource";
+import { useFileUpload } from "@/app/hooks/useFileUpload";
 import { routes } from "@/src/lib/routes";
 import { VEO_VARIANT_LABELS, allowedAspectRatios, allowedResolutions } from "@/src/lib/brollModels";
+import {
+  DEFAULT_ORCHESTRATOR_MODEL,
+  ORCHESTRATOR_MODEL_LABELS,
+} from "@/src/lib/orchestratorModels";
 import type { Reel, ReelConfigRow } from "@/src/lib/db/types";
 import type { ValidationResult } from "@/src/adapters/types";
 
@@ -55,8 +62,10 @@ export default function ReelSetupPage({ params }: { params: Promise<{ reelId: st
   const [avatarLookId, setAvatarLookId] = useState<string | undefined>(undefined);
   const [includeBroll, setIncludeBroll] = useState(true);
   const [veoVariant, setVeoVariant] = useState("fast");
+  const [orchestratorModel, setOrchestratorModel] = useState<string>(DEFAULT_ORCHESTRATOR_MODEL);
   const [aspectRatio, setAspectRatio] = useState("9:16");
   const [resolution, setResolution] = useState("1080p");
+  const [productRefs, setProductRefs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -73,9 +82,19 @@ export default function ReelSetupPage({ params }: { params: Promise<{ reelId: st
     setAvatarLookId(cfg.avatar_look_id ?? undefined);
     setIncludeBroll(!!cfg.broll_provider);
     setVeoVariant(cfg.veo_variant);
+    setOrchestratorModel(cfg.orchestrator_model ?? DEFAULT_ORCHESTRATOR_MODEL);
     setAspectRatio(cfg.aspect_ratio);
     setResolution(cfg.resolution);
+    setProductRefs(cfg.product_reference_paths ?? []);
   }, [data]);
+
+  const { upload, uploading } = useFileUpload(clientId ?? "");
+
+  async function handleAddProductRefs(files: FileList) {
+    const uploaded: string[] = [];
+    for (const file of Array.from(files)) uploaded.push(await upload(file, "asset", reelId));
+    setProductRefs((prev) => [...prev, ...uploaded]);
+  }
 
   const { data: avatarsData } = useApiResource<ClientAvatarsResponse>(
     avatarEnabled && clientId ? `/api/clients/${clientId}` : null
@@ -93,6 +112,21 @@ export default function ReelSetupPage({ params }: { params: Promise<{ reelId: st
     if (!aspectOptions.includes(aspectRatio)) setAspectRatio(aspectOptions[0]);
     if (!resolutionOptions.includes(resolution)) setResolution(resolutionOptions[0]);
   }, [aspectOptions, resolutionOptions, aspectRatio, resolution]);
+
+  // Resolved from live form state, not from the saved row, so the limits update
+  // as the model/resolution dropdowns change rather than only after a save —
+  // the choice and its consequences are on screen at the same moment.
+  // music_provider is omitted: it is chosen later, on the music page.
+  const constraintSets = reelConstraintSets({
+    broll_provider: brollProvider ?? null,
+    veo_variant: veoVariant,
+    avatar_enabled: avatarEnabled,
+    image_provider: "nano_banana",
+    music_provider: null,
+    aspect_ratio: aspectRatio,
+    resolution,
+    has_product_references: productRefs.length > 0,
+  });
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -113,8 +147,10 @@ export default function ReelSetupPage({ params }: { params: Promise<{ reelId: st
           broll_provider: brollProvider,
           image_provider: "nano_banana",
           veo_variant: veoVariant,
+          orchestrator_model: orchestratorModel,
           aspect_ratio: aspectRatio,
           resolution,
+          product_reference_paths: productRefs,
         }),
       });
       const resData = await res.json();
@@ -184,6 +220,43 @@ export default function ReelSetupPage({ params }: { params: Promise<{ reelId: st
                 />
                 <span className="w-12 shrink-0 text-right text-sm text-muted-foreground">{totalSeconds}s</span>
               </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="product_refs">Product reference photos</Label>
+              <input
+                id="product_refs"
+                type="file"
+                accept="image/*"
+                multiple
+                disabled={uploading || !clientId}
+                onChange={(e) => {
+                  if (e.target.files?.length) handleAddProductRefs(e.target.files);
+                  e.target.value = "";
+                }}
+                className="text-sm"
+              />
+              <span className="text-xs text-muted-foreground">
+                {uploading
+                  ? "Uploading…"
+                  : `${productRefs.length} attached — sent as reference images with every image and clip generated for this reel.`}
+              </span>
+              {productRefs.length > 0 ? (
+                <ul className="flex flex-col gap-1">
+                  {productRefs.map((path) => (
+                    <li key={path} className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span className="truncate">{path.split("/").pop()}</span>
+                      <button
+                        type="button"
+                        className="text-destructive underline"
+                        onClick={() => setProductRefs((prev) => prev.filter((p) => p !== path))}
+                      >
+                        remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </div>
 
             <label className="flex items-center gap-2 text-sm">
@@ -270,6 +343,25 @@ export default function ReelSetupPage({ params }: { params: Promise<{ reelId: st
               </div>
             ) : null}
 
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="orchestrator_model">Orchestrating LLM</Label>
+              <Select value={orchestratorModel} onValueChange={setOrchestratorModel}>
+                <SelectTrigger id="orchestrator_model">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(ORCHESTRATOR_MODEL_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <span className="text-xs text-muted-foreground">
+                Writes this reel&apos;s scenes and prompts. Applies to the whole reel.
+              </span>
+            </div>
+
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col gap-1">
                 <Label htmlFor="aspect">Aspect ratio</Label>
@@ -301,6 +393,13 @@ export default function ReelSetupPage({ params }: { params: Promise<{ reelId: st
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            <div className="rounded-md border border-border p-3">
+              <ModelConstraintsPanel
+                sets={constraintSets}
+                description="The scene script is written against these, so they shape the reel before anything is generated. Most produce no error — the model quietly renders something other than what was asked for."
+              />
             </div>
 
             {validation ? <CapabilityGuard validation={validation} /> : null}

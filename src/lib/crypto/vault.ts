@@ -1,13 +1,12 @@
 /**
  * Supabase Vault wrapper (Assumption 6 / brief §4): provider_keys stores a
- * `vault_secret_id`; the raw key is decrypted server/worker-side only, via
+ * `vault_secret_id`; the raw key is decrypted server-side only, via
  * the `vault_create_secret`/`vault_read_secret` SECURITY DEFINER RPCs
  * defined in supabase/migrations/0001_init.sql (EXECUTE granted to
  * service_role only). Never call these from a browser-facing code path
  * (enforced by code organization/review — see src/lib/supabase/service.ts
  * for why the `server-only` package isn't used here: it's incompatible
- * with the plain-Node contexts this module must also run in, Vitest and
- * the tsx-run worker).
+ * with the plain-Node contexts this module must also run in, e.g. Vitest).
  */
 import type { ServiceClient } from "@/src/lib/supabase/service";
 import type { Provider } from "@/src/lib/db/enums";
@@ -42,7 +41,7 @@ async function readSecret(supa: ServiceClient, vaultSecretId: string): Promise<s
  * KeyResolver falls back to the sibling row if only one was ever written —
  * so adapters never need to know about the duplication.
  */
-const GOOGLE_BACKED_PROVIDERS: readonly Provider[] = ["nano_banana", "veo", "lyria"];
+const GOOGLE_BACKED_PROVIDERS: readonly Provider[] = ["nano_banana", "veo", "lyria", "gemini"];
 
 /** `StageContext.keys` (spec §6) — resolves a client's decrypted provider key. */
 export interface KeyResolver {

@@ -6,6 +6,7 @@
 import type { Adapter, AdapterCapabilities, EstimateInput, GenerateInput, GenerateResult, ValidationResult } from "../types";
 import { ELEVENLABS_CONFIG } from "../config";
 import { buildGeneratedPath, type StorageClient } from "@/src/lib/storage";
+import { modelPromptElevenLabs } from "@/src/skills/model-prompt/elevenlabs";
 
 const CAPABILITIES: AdapterCapabilities = {
   category: "music",
@@ -41,11 +42,14 @@ export function createElevenLabsMusicAdapter(deps: { storage: StorageClient }): 
     }
 
     const seconds = input.duration_s ?? ELEVENLABS_CONFIG.defaultDurationS;
+    // Eleven Music produces vocals unless told not to, and a vocal track is
+    // unusable under a product ad — enforced in code, not left to the prompt.
+    const payload = modelPromptElevenLabs(input.prompt);
     const res = await fetch(`${ELEVENLABS_CONFIG.baseUrl}/v1/music`, {
       method: "POST",
       headers: { "xi-api-key": input.provider_key, "Content-Type": "application/json" },
       body: JSON.stringify({
-        prompt: input.prompt,
+        prompt: payload.prompt,
         music_length_ms: Math.round(seconds * 1000),
         model_id: ELEVENLABS_CONFIG.model,
       }),

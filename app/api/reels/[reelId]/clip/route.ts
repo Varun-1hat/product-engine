@@ -19,6 +19,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildStageContext } from "@/src/lib/context";
 import { clipStage } from "@/src/stages/clip";
+import { reconcilePendingJobs } from "@/src/lib/jobs/run";
 import { assetHistory, getAsset, getCurrentPromptVersion, promptHistory } from "@/src/lib/versioning";
 import type { StageContext } from "@/src/stages/types";
 import type { SceneRow } from "@/src/lib/db/types";
@@ -36,7 +37,16 @@ interface SlotDetail {
   current_version_no: number;
   preview_url: string | null;
   history: VersionSummary[];
-  prompt: { id: string; text: string; version_no: number; history: VersionSummary[] } | null;
+  prompt: {
+    id: string;
+    text: string;
+    version_no: number;
+    history: VersionSummary[];
+    /** Stage-level reference images attached to this clip's prompt. */
+    reference_paths: string[];
+    /** Per-clip opt-out of the reel's product reference photos. */
+    use_product_refs: boolean;
+  } | null;
 }
 
 type PromptDetail = NonNullable<SlotDetail["prompt"]>;
@@ -44,11 +54,14 @@ type PromptDetail = NonNullable<SlotDetail["prompt"]>;
 async function buildPromptDetail(ctx: StageContext, promptId: string): Promise<PromptDetail | null> {
   const [current, history] = await Promise.all([getCurrentPromptVersion(ctx.supa, promptId), promptHistory(ctx.supa, promptId)]);
   if (!current) return null;
+  const { data: row } = await ctx.supa.from("prompts").select("use_product_refs").eq("id", promptId).maybeSingle();
   return {
     id: promptId,
     text: current.text,
     version_no: current.version_no,
     history: history.map((h) => ({ id: h.id, version_no: h.version_no, created_at: h.created_at })),
+    reference_paths: current.reference_paths ?? [],
+    use_product_refs: (row as { use_product_refs: boolean } | null)?.use_product_refs ?? true,
   };
 }
 
@@ -94,6 +107,10 @@ async function buildSlotDetail(ctx: StageContext, assetId: string): Promise<Slot
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ reelId: string }> }) {
   const { reelId } = await params;
   const ctx = await buildStageContext(reelId);
+  // Finish any provider generations that completed since the last read
+  // (src/lib/jobs/run.ts) — this is what advances awaiting_provider clips now
+  // that there's no standing poller. Never throws; never blocks the response.
+  await reconcilePendingJobs(ctx);
   const state = await clipStage.load(ctx);
   const scenes = (state.data as { scenes: SceneRow[] }).scenes;
 

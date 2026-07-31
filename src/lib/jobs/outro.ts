@@ -1,11 +1,11 @@
 /**
- * worker/outro.ts — Stage 7 `outro_gen` job handler (job_type_t
+ * src/lib/jobs/outro.ts — Stage 7 `outro_gen` job handler (job_type_t
  * 'outro_gen', spec §7 Stage 7, §8, R2 routing rule). Not one of the 5
- * worker files spec §12 names verbatim, but Stage 7's dual-route logic
+ * job handlers spec §12 names verbatim, but Stage 7's dual-route logic
  * (model vs deterministic crossfade) needs a home distinct from the
- * dispatcher (index.ts) and the Stage 9 pipeline (assembly.ts) — added
- * here with the same "worker does the ffmpeg/provider work" split as the
- * other worker/*.ts files (see .pipeline/changes.md).
+ * dispatcher (run.ts) and the Stage 9 pipeline (assembly.ts) — added here
+ * with the same handler-per-job-type split as the other src/lib/jobs/*.ts
+ * files (see .pipeline/changes.md).
  *
  * route='crossfade': ffmpeg fade from the last scene's final frame to the
  * branded end-frame image over outro_seconds — no provider call, cost $0
@@ -14,7 +14,7 @@
  * or — if it has none, e.g. avatar-last or a non-end-frame b-roll model —
  * extract the last frame of its clip via ffmpeg), call the effective
  * outro model's generate(), and mark the job awaiting_provider so
- * worker/reconcile.ts's poll loop finishes it (same cost-logging-at-
+ * src/lib/jobs/reconcile.ts's poll loop finishes it (same cost-logging-at-
  * completion pattern as Stage 5 clips).
  */
 import { randomUUID } from "node:crypto";
@@ -215,7 +215,7 @@ async function runModelRoute(
 
     await jobs.markAwaitingProvider(job.id, result.provider_job_id);
 
-    // Stash the now-known billing context in payload for worker/reconcile.ts
+    // Stash the now-known billing context in payload for src/lib/jobs/reconcile.ts
     // to log accurately at completion (JobQueue has no dedicated "patch
     // payload" method, so this updates the row directly).
     //
@@ -225,7 +225,7 @@ async function runModelRoute(
     // billing needs the resolution-qualified form (composeVeoVariant) —
     // `result.variant` is Veo's own echoed-back BARE variant and must NOT
     // be allowed to win here, or the rate_card lookup at completion time
-    // (worker/reconcile.ts) silently comes back rate_missing again.
+    // (src/lib/jobs/reconcile.ts) silently comes back rate_missing again.
     const billingVariant =
       providerId === "veo" && payload.variant
         ? composeVeoVariant(payload.variant, payload.resolution)

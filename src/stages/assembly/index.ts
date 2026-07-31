@@ -1,10 +1,11 @@
 /**
  * Stage 9 — Assembly (spec §7 Stage 9). Gathers everything
- * worker/assembly.ts needs (buildAssemblyPlan, ./plan.ts), enqueues an
- * `assembly` job, and returns immediately — the actual ffmpeg work
- * (audio-strip/normalize/seam-trim/concat/music bed/mux) runs in the
- * worker. Re-running this stage enqueues a new job -> a new `final_render`
- * asset_version on the SAME asset (worker looks it up by reel_id+slot).
+ * src/lib/jobs/assembly.ts needs (buildAssemblyPlan, ./plan.ts) and runs the
+ * `assembly` job inline (src/lib/jobs/run.ts) — the ffmpeg work
+ * (audio-strip/normalize/seam-trim/concat/music bed/mux) happens inside the
+ * request, so POST returns once the render exists. Re-running this stage
+ * runs a new job -> a new `final_render` asset_version on the SAME asset
+ * (the handler looks it up by reel_id+slot).
  * Cost: none (no provider calls at this stage).
  */
 import { randomUUID } from "node:crypto";
@@ -15,6 +16,7 @@ import { getAsset } from "@/src/lib/versioning";
 import { buildAssemblyPlan, type AssemblyMusicSource, type AssemblyPlan } from "./plan";
 import { supportsEndFrameLookupFor } from "@/src/lib/routing";
 import type { AssetRow } from "@/src/lib/db/types";
+import { runJobInline } from "@/src/lib/jobs/run";
 import type { Job } from "@/src/lib/jobs/queue";
 import type { StageId } from "@/src/lib/db/enums";
 
@@ -106,13 +108,13 @@ async function process(_input: AssemblyInput, ctx: StageContext): Promise<Assemb
     payload: { plan },
   });
 
-  return { job, plan };
+  return { job: await runJobInline(ctx, job), plan };
 }
 
 async function advance(ctx: StageContext): Promise<StageId> {
   // Assembly is the last stage in the fixed order — stays put. reels.status
-  // transitions to 'assembled' when worker/assembly.ts finishes the job,
-  // not here (this only enqueues it).
+  // transitions to 'assembled' in src/lib/jobs/assembly.ts when the render
+  // finishes, not here.
   const { error } = await ctx.supa.from("reels").update({ current_stage: "assembly" }).eq("id", ctx.reelId);
   if (error) throw new Error(`reels advance failed: ${error.message}`);
   return "assembly";

@@ -12,6 +12,10 @@ import { nextStage } from "../types";
 import type { AssetRow, AssetVersion, ReelConfigRow } from "@/src/lib/db/types";
 import { PROVIDERS, type Provider, type StageId } from "@/src/lib/db/enums";
 import { assetHistory, revertAssetVersion, upsertAssetVersion } from "@/src/lib/versioning";
+import { getBrandContext } from "@/src/lib/brandContext";
+import { getScenesForReel } from "@/src/lib/rows";
+import { promptStaleness, targetModelFor } from "@/src/skills/model-prompt/guidance";
+import { reelModelContext } from "@/src/lib/modelConstraints";
 
 export const musicInputSchema = z.object({
   /** Already-uploaded (music/ bucket) path for the new/replacement track — omit to only change the trim. */
@@ -40,6 +44,52 @@ export type MusicGenerateInput = z.infer<typeof musicGenerateInputSchema>;
 
 const DEFAULT_MUSIC_PROVIDER: Provider = "elevenlabs";
 
+/**
+ * Writes the music prompt from the reel brief, optimised for the selected music
+ * model — the first draft only. It never overwrites an existing prompt, so a
+ * hand-edited one survives; `force` is how the UI's "re-optimise for <model>"
+ * action asks for a rewrite after the provider changed.
+ *
+ * Kept separate from generate() so the prompt is reviewable BEFORE the paid
+ * call, matching how ensureClipPrompts/ensureImagePrompts work.
+ */
+export async function ensureMusicPrompt(
+  ctx: StageContext,
+  opts: { force?: boolean } = {}
+): Promise<ReelConfigRow> {
+  const { data, error } = await ctx.supa.from("reel_config").select("*").eq("reel_id", ctx.reelId).single();
+  if (error) throw new Error(`reel_config lookup failed: ${error.message}`);
+  const reelConfig = data as ReelConfigRow;
+
+  if (!opts.force && reelConfig.music_prompt?.trim()) return reelConfig;
+
+  const provider = reelConfig.music_provider ?? DEFAULT_MUSIC_PROVIDER;
+  const target = targetModelFor(provider);
+  const brand = await getBrandContext(ctx.supa, ctx.clientId);
+  const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
+
+  const { prompt } = await ctx.skills.musicPrompt(
+    {
+      topic: reelConfig.topic,
+      topic_description: reelConfig.topic_description,
+      total_seconds_target: Number(reelConfig.total_seconds_target),
+      scene_count: scenes.length,
+      brand,
+    },
+    target ?? undefined,
+    reelModelContext(reelConfig)
+  );
+
+  const { data: updated, error: updateError } = await ctx.supa
+    .from("reel_config")
+    .update({ music_prompt: prompt, music_prompt_target_model: target?.id ?? null })
+    .eq("reel_id", ctx.reelId)
+    .select("*")
+    .single();
+  if (updateError) throw new Error(`reel_config update (music_prompt) failed: ${updateError.message}`);
+  return updated as ReelConfigRow;
+}
+
 export interface MusicOutput {
   reel_config: ReelConfigRow;
 }
@@ -47,7 +97,20 @@ export interface MusicOutput {
 async function load(ctx: StageContext): Promise<StageState> {
   const { data, error } = await ctx.supa.from("reel_config").select("*").eq("reel_id", ctx.reelId).single();
   if (error) throw new Error(`reel_config lookup failed: ${error.message}`);
-  return { stage: "music", data: { reel_config: data as ReelConfigRow } };
+  const reelConfig = data as ReelConfigRow;
+  return {
+    stage: "music",
+    data: {
+      reel_config: reelConfig,
+      // Advisory: the two music models want near-opposite prompt shapes, so a
+      // provider switch is worth flagging. ensureMusicPrompt({force:true}) is
+      // the re-optimise action; leaving it alone is fine.
+      prompt_staleness: promptStaleness(
+        reelConfig.music_prompt_target_model,
+        targetModelFor(reelConfig.music_provider ?? DEFAULT_MUSIC_PROVIDER)
+      ),
+    },
+  };
 }
 
 /** The reel's single music slot (one `assets` row, one version per generate/upload). */
@@ -88,7 +151,12 @@ async function process(
   const patch: Record<string, unknown> = {};
   if (input.music_storage_path !== undefined) patch.music_path = input.music_storage_path;
   if (input.music_trim !== undefined) patch.music_trim = input.music_trim;
-  if (input.music_prompt !== undefined) patch.music_prompt = input.music_prompt;
+  // A hand-edited prompt is no longer "optimised for model X" — drop the claim
+  // rather than let the UI keep asserting something that is no longer true.
+  if (input.music_prompt !== undefined) {
+    patch.music_prompt = input.music_prompt;
+    patch.music_prompt_target_model = null;
+  }
   if (input.music_provider !== undefined) patch.music_provider = input.music_provider;
 
   // A new track (generated or uploaded) becomes a new immutable version of the
@@ -132,7 +200,10 @@ export async function generate(input: MusicGenerateInput, ctx: StageContext): Pr
   if (configError) throw new Error(`reel_config lookup failed: ${configError.message}`);
   const reelConfig = configRow as ReelConfigRow;
 
-  const prompt = input.prompt ?? reelConfig.music_prompt;
+  // No hand-typed prompt needed any more: the music-prompt skill drafts one
+  // from the reel brief, optimised for the selected model.
+  const resolved = input.prompt ?? reelConfig.music_prompt ?? (await ensureMusicPrompt(ctx)).music_prompt;
+  const prompt = resolved;
   if (!prompt?.trim()) throw new Error("a music prompt is required before generating");
   const provider = input.provider ?? reelConfig.music_provider ?? DEFAULT_MUSIC_PROVIDER;
   const requestedDurationS = input.duration_s ?? Number(reelConfig.total_seconds_target);

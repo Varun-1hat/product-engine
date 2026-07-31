@@ -35,7 +35,14 @@ interface SlotDetail {
   current_version_no: number;
   preview_url: string | null;
   history: VersionSummary[];
-  prompt: { id: string; text: string; version_no: number; history: VersionSummary[] } | null;
+  prompt: {
+    id: string;
+    text: string;
+    version_no: number;
+    history: VersionSummary[];
+    reference_paths: string[];
+    use_product_refs: boolean;
+  } | null;
 }
 
 /** Matches `GET /api/reels/{reelId}/clip`'s response shape (spec §5.1). */
@@ -218,7 +225,6 @@ export default function ClipStagePage({ params }: { params: Promise<{ reelId: st
               {scene.type === "avatar" ? (
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <span>Avatar look: {avatarName ?? "none selected"}</span>
-                  {scene.product_in_scene ? <Badge variant="secondary">uses product photos as reference</Badge> : null}
                 </div>
               ) : null}
             </CardHeader>
@@ -259,6 +265,11 @@ export default function ClipStagePage({ params }: { params: Promise<{ reelId: st
                   currentText={prompt.text}
                   currentVersionNo={prompt.version_no}
                   history={prompt.history}
+                  currentRefs={prompt.reference_paths}
+                  promptsEndpoint={`/api/reels/${reelId}/clip/prompts`}
+                  useProductRefs={prompt.use_product_refs}
+                  clientId={clientId}
+                  reelId={reelId}
                   onChanged={load}
                 />
               ) : (

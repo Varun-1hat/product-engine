@@ -1,16 +1,20 @@
 /**
  * Stage 9 (assembly) — build the deterministic AssemblyPlan and enqueue the
- * ffmpeg job (worker/assembly.ts). Thin: delegates to src/stages/assembly.
+ * ffmpeg job (src/lib/jobs/assembly.ts). Thin: delegates to src/stages/assembly.
  * Re-POSTing re-assembles -> a new final_render asset_version.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/src/lib/supabase/service";
 import { buildStageContext } from "@/src/lib/context";
 import { assemblyStage } from "@/src/stages/assembly";
+import { reconcilePendingJobs } from "@/src/lib/jobs/run";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ reelId: string }> }) {
   const { reelId } = await params;
   const ctx = await buildStageContext(reelId);
+  // Upstream clip/outro generations may still be awaiting_provider — finish
+  // any the provider has completed (src/lib/jobs/run.ts). Never throws.
+  await reconcilePendingJobs(ctx);
   const state = await assemblyStage.load(ctx);
 
   const supa = createServiceClient();

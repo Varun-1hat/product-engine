@@ -1,5 +1,5 @@
 /**
- * Small temp-file helpers for worker ffmpeg jobs (trim/assembly): download
+ * Small temp-file helpers for ffmpeg jobs (trim/assembly): download
  * source media to a local file (fluent-ffmpeg shells out to the ffmpeg
  * binary and needs real file paths, not buffers/streams), write ffmpeg's
  * output back out, then clean up.

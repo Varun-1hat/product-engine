@@ -4,7 +4,7 @@ import path from "node:path";
 // Pure-logic test config. The pipeline's testable surface (cost engine,
 // effective-model routing, continuity/shared-frame lineage, adapter
 // validate()/estimate(), assembly-plan construction, job-queue helpers)
-// lives in framework-free src/** and worker/** modules, so no DOM/React
+// lives in framework-free src/** and src/lib/jobs/** modules, so no DOM/React
 // test environment is needed here.
 //
 // app/**/*.test.ts is included too (added by the Tester pass): the
@@ -17,14 +17,14 @@ import path from "node:path";
 //
 // middleware.test.ts is listed explicitly (added by the V2 Phase 0 Tester
 // pass): middleware.ts lives at the repo root (same level as
-// next.config.ts, required by Next's convention), outside src/**, worker/**
+// next.config.ts, required by Next's convention), outside src/**, src/lib/jobs/**
 // and app/**, so none of the globs above would otherwise pick it up. It's a
 // plain (NextRequest) => NextResponse function with @supabase/ssr mocked at
 // the module boundary — same node environment, no DOM needed.
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts", "worker/**/*.test.ts", "app/**/*.test.ts", "middleware.test.ts"],
+    include: ["src/**/*.test.ts", "app/**/*.test.ts", "middleware.test.ts"],
     exclude: ["node_modules", ".next", "dist"],
     restoreMocks: true,
   },

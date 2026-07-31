@@ -2,7 +2,7 @@
  * src/stages/outro/index.ts had zero test coverage before this pass.
  * Focus: V2 Phase 0 item 4 / N2 (.pipeline/spec.md) — the outro_gen job
  * enqueue (enqueueOutroClip) previously had no idempotency_key, which left
- * worker/reconcile.ts's cost_log double-charge guard (partial
+ * src/lib/jobs/reconcile.ts's cost_log double-charge guard (partial
  * UNIQUE(reel_id, provider, idempotency_key)) inert for outro-via-a-model
  * generations. Also covers item 2/BLOCK-2's redaction on this stage's
  * redoAsset review hook (toPublicJob), since it shares enqueueOutroClip with
@@ -18,7 +18,18 @@
  * out of scope for this stage's N2 fix, which applies to the job enqueue
  * unconditionally regardless of route).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Jobs now run inline at their enqueue point (src/lib/jobs/run.ts) rather
+// than being picked up by a separate process. These tests are about what
+// this stage ENQUEUES (idempotency_key, BLOCK-2 redaction) — not the ffmpeg/
+// provider work itself, which needs real Storage — so the inline run is
+// stubbed to a pass-through and the enqueued row stays what's asserted on.
+vi.mock("@/src/lib/jobs/run", () => ({
+  runJobInline: async (_deps: unknown, job: unknown) => job,
+  reconcilePendingJobs: async () => {},
+}));
+
 import { outroStage, createOutroReviewHooks } from "./index";
 import { createJobQueue } from "@/src/lib/jobs/queue";
 import { createFakeSupabase, type FakeRow, type FakeSupabaseClient } from "@/src/testUtils/fakeSupabase";
@@ -64,7 +75,6 @@ function seedSupa(): FakeSupabaseClient {
         reel_id: REEL_ID,
         position: 0,
         type: "broll",
-        product_in_scene: false,
         seconds: 5,
         transition_to_next: null,
         broll_provider_override: null,
@@ -110,8 +120,17 @@ function unusedSkills(): SkillRegistry {
     sceneBrain: async () => {
       throw new Error("sceneBrain should not be called on the crossfade route");
     },
+    musicPrompt: async () => {
+      throw new Error("musicPrompt should not be called by outro");
+    },
     imagePrompt: async () => {
       throw new Error("imagePrompt should not be called by outro");
+    },
+    sceneDescription: async () => {
+      throw new Error("sceneDescription should not be called by outroStage");
+    },
+    sceneInstruction: async () => {
+      throw new Error("sceneInstruction should not be called by outroStage");
     },
     brandStyleLock: async () => {
       throw new Error("brandStyleLock should not be called on the crossfade route");

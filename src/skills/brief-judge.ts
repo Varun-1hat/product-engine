@@ -19,7 +19,12 @@ const SYSTEM_PROMPT = [
   "You are NOT a gate. Your output is only ever shown as a hint in a human review UI and never blocks any action.",
 ].join("\n");
 
-export async function briefJudge(input: BriefJudgeInput, onUsage?: LlmUsageSink): Promise<BriefJudgeOutput> {
+export async function briefJudge(
+  input: BriefJudgeInput,
+  onUsage?: LlmUsageSink,
+  model?: string,
+  apiKey?: string
+): Promise<BriefJudgeOutput> {
   const userPrompt = JSON.stringify({ brief: input.brief, brand: input.brand, asset: input.assetRef });
 
   return callLlmJson({
@@ -27,5 +32,7 @@ export async function briefJudge(input: BriefJudgeInput, onUsage?: LlmUsageSink)
     prompt: `Judge this asset against the brief:\n${userPrompt}\n\nRespond as JSON: { "score": number (0-1), "notes": string }`,
     schema: outputSchema,
     onUsage,
+    model,
+    apiKey,
   });
 }

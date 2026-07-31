@@ -1,17 +1,17 @@
 /**
  * Storage helper (§2.3): 5 private buckets, signed-URL download only. Path
  * convention `{client_id}/{reel_id}/{slot}/{asset_id}/v{version_no}.{ext}`
- * for reel-scoped assets; client-scoped assets (brand kit, product photos)
+ * for reel-scoped assets; client-scoped assets (brand kit)
  * use buildClientPath instead, since they have no reel_id.
  *
- * Server/worker-only by code-organization convention (see
+ * Server-only by code-organization convention (see
  * src/lib/supabase/service.ts for why the `server-only` package is not
- * used across src/lib/**): it must also run under Vitest and the tsx-run
- * worker, neither of which is Next's webpack/RSC bundler.
+ * used across src/lib/**): it must also run under Vitest, which is not
+ * Next's webpack/RSC bundler.
  */
 import type { ServiceClient } from "@/src/lib/supabase/service";
 
-export const BUCKETS = ["brand", "products", "assets", "music", "renders"] as const;
+export const BUCKETS = ["brand", "assets", "music", "renders"] as const;
 export type BucketName = (typeof BUCKETS)[number];
 
 export function buildAssetPath(params: {
@@ -26,7 +26,7 @@ export function buildAssetPath(params: {
   return `${params.client_id}/${params.reel_id}/${params.slot}/${params.asset_id}/v${params.version_no}.${ext}`;
 }
 
-/** Client-level (not reel-scoped) paths — brand logo, product photos (Stage 1). */
+/** Client-level (not reel-scoped) paths — brand logo (Stage 1). */
 export function buildClientPath(params: { client_id: string; category: string; file_id: string; ext: string }): string {
   const ext = params.ext.replace(/^\./, "");
   return `${params.client_id}/${params.category}/${params.file_id}.${ext}`;

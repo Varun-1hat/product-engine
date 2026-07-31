@@ -2,7 +2,7 @@
  * Avatar rename/remove (spec §8.2). Deliberately a separate file from
  * src/stages/config/index.ts — kept out of that shared module so this
  * section never touches a file Wave D4's concurrent Config work (brand
- * kit/keys/products) might also be editing. Mirrors that file's plain
+ * kit/keys) might also be editing. Mirrors that file's plain
  * ServiceClient-scoped upsert/delete convention exactly (read it for the
  * pattern; not imported from here).
  *

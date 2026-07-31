@@ -1,12 +1,15 @@
 /**
- * Postgres `jobs` queue (Assumption 3 / brief §10.19): claimed with
- * `FOR UPDATE SKIP LOCKED` via the `claim_jobs`/`claim_awaiting_jobs` RPCs
- * in supabase/migrations/0001_init.sql — no extra infra (no Redis/SQS).
- * enqueue/complete/fail/get are plain table operations (service_role
- * bypasses RLS); claiming needs the atomic RPC so concurrent workers never
- * grab the same row. Server/worker-only by code-organization convention
+ * Postgres `jobs` queue (Assumption 3 / brief §10.19) — no extra infra (no
+ * Redis/SQS). Jobs run inline at their enqueue point (src/lib/jobs/run.ts);
+ * this table is the record of what ran, its status, and its cost/idempotency
+ * trail. enqueue/complete/fail/get are plain table operations (service_role
+ * bypasses RLS). The one thing still claimed atomically is
+ * awaiting_provider polling (claim_awaiting_jobs, FOR UPDATE SKIP LOCKED in
+ * supabase/migrations/0001_init.sql), so two concurrent requests can never
+ * poll — or complete — the same provider job twice.
+ * Server-only by code-organization convention
  * (see src/lib/supabase/service.ts for why `server-only` is not used here
- * — this module must also run under Vitest and the tsx-run worker).
+ * — this module must also run under Vitest).
  */
 import type { ServiceClient } from "@/src/lib/supabase/service";
 import type { JobStatus, JobType, Provider } from "@/src/lib/db/enums";
@@ -67,8 +70,6 @@ export interface EnqueueInput {
 
 export interface JobQueue {
   enqueue(input: EnqueueInput): Promise<Job>;
-  /** Claim `limit` queued jobs (status queued -> processing, bumps attempts). */
-  claim(workerId: string, types?: JobType[], limit?: number): Promise<Job[]>;
   /** Claim `limit` awaiting_provider jobs for polling (status/attempts untouched). */
   claimAwaitingProvider(workerId: string, limit?: number): Promise<Job[]>;
   markAwaitingProvider(jobId: string, providerJobId: string): Promise<Job>;
@@ -77,17 +78,16 @@ export interface JobQueue {
   /**
    * Re-arms an awaiting_provider job for another poll attempt WITHOUT
    * transitioning it to a terminal/queued state (unlike fail(), which moves
-   * a retryable job to 'queued' — a status worker/index.ts's main claim
-   * loop treats as fatal for broll_gen/avatar_gen/outro_gen, since those
-   * job types never pass through it). Bumps `attempts` by one (this queue
+   * a retryable job to 'queued' — a status nothing picks up, since those
+   * job types never pass through the inline dispatcher). Bumps `attempts` by
+   * one (this queue
    * has no other "an attempt was just spent" signal for awaiting_provider
    * jobs — claim_awaiting_jobs deliberately leaves attempts untouched,
    * since a poll isn't a generate attempt) so a caller-side
    * `attempts >= max_attempts` cap still eventually terminates. Used by
-   * worker/reconcile.ts's transient-error path (N1).
+   * src/lib/jobs/reconcile.ts's transient-error path (N1).
    */
   retryLater(jobId: string, runAfter: Date, error?: string): Promise<Job>;
-  release(jobId: string): Promise<void>;
   get(jobId: string): Promise<Job | null>;
 }
 
@@ -112,16 +112,6 @@ export function createJobQueue(supa: ServiceClient): JobQueue {
         .single();
       if (error) throw new Error(`jobs.enqueue failed: ${error.message}`);
       return data as Job;
-    },
-
-    async claim(workerId, types, limit = 1) {
-      const { data, error } = await supa.rpc("claim_jobs", {
-        p_worker_id: workerId,
-        p_types: types ?? null,
-        p_limit: limit,
-      });
-      if (error) throw new Error(`jobs.claim failed: ${error.message}`);
-      return (data ?? []) as Job[];
     },
 
     async claimAwaitingProvider(workerId, limit = 10) {
@@ -195,14 +185,6 @@ export function createJobQueue(supa: ServiceClient): JobQueue {
       const { data, error: updateError } = await supa.from("jobs").update(update).eq("id", jobId).select("*").single();
       if (updateError) throw new Error(`jobs.retryLater failed: ${updateError.message}`);
       return data as Job;
-    },
-
-    async release(jobId) {
-      const { error } = await supa
-        .from("jobs")
-        .update({ status: "queued", locked_by: null, locked_at: null })
-        .eq("id", jobId);
-      if (error) throw new Error(`jobs.release failed: ${error.message}`);
     },
 
     async get(jobId) {

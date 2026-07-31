@@ -7,11 +7,11 @@
  *
  * Not marked with the `server-only` package: that marker only no-ops under
  * Next's webpack/RSC bundler (via a `react-server` export condition) and
- * throws unconditionally under plain Node (Vitest, the tsx-run worker), so
+ * throws unconditionally under plain Node (Vitest), so
  * it's a poor fit for framework-free src/** modules that must also run
  * there. This file is Next-only anyway by construction (`next/headers`
  * only works inside Next's request handling) — never import it from a
- * Client Component or from the worker.
+ * Client Component.
  */
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";

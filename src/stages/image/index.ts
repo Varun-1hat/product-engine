@@ -23,7 +23,8 @@ import { nextStage } from "../types";
 import { planImageSlots, type DistinctImageSlot } from "./plan";
 import { supportsEndFrameLookupFor } from "@/src/lib/routing";
 import { getReelConfig, getScene, getScenesForReel } from "@/src/lib/rows";
-import { getBrandContext, getProductsWithPhotos, guessMimeFromExt } from "@/src/lib/brandContext";
+import { getBrandContext, guessMimeFromExt } from "@/src/lib/brandContext";
+import { productRefPaths } from "@/src/lib/productRefs";
 import {
   assetHistory,
   getAsset,
@@ -38,6 +39,8 @@ import {
 import { createUploadedAsset, uploadAssetVersion } from "@/src/lib/assetUpload";
 import type { AssetRow, AssetVersion, ReelConfigRow, SceneRow } from "@/src/lib/db/types";
 import type { PromptKind } from "@/src/lib/db/enums";
+import { promptStaleness, targetModelFor } from "@/src/skills/model-prompt/guidance";
+import { reelModelContext } from "@/src/lib/modelConstraints";
 
 export const imageInputSchema = z.object({});
 export type ImageInput = z.infer<typeof imageInputSchema>;
@@ -56,7 +59,34 @@ function promptKindFor(role: "start" | "end"): PromptKind {
 
 async function load(ctx: StageContext): Promise<StageState> {
   const scenes = await getScenesForReel(ctx.supa, ctx.reelId);
-  return { stage: "image", data: { scenes } };
+  const reelConfig = await getReelConfig(ctx.supa, ctx.reelId);
+  const current = targetModelFor(reelConfig.image_provider);
+
+  // Keyed "<sceneId>:<start|end>" — a scene has up to two image slots and each
+  // carries its own stored prompt. Advisory; redoPrompt() re-optimises.
+  const entries = await Promise.all(
+    scenes.flatMap((scene) =>
+      (["start", "end"] as const).map(async (role) => {
+        const stored = await getStoredTargetModel(ctx, scene.id, promptKindFor(role));
+        return [`${scene.id}:${role}`, promptStaleness(stored, current)] as const;
+      })
+    )
+  );
+
+  return {
+    stage: "image",
+    data: { scenes, prompt_staleness: Object.fromEntries(entries.filter(([, v]) => v !== null)) },
+  };
+}
+
+/** Reads back which model a slot's stored prompt was optimised for. */
+async function getStoredTargetModel(ctx: StageContext, sceneId: string, kind: PromptKind): Promise<string | null> {
+  const { data, error } = await ctx.supa.from("prompts").select("id").eq("scene_id", sceneId).eq("kind", kind).maybeSingle();
+  if (error) throw new Error(`prompts lookup failed: ${error.message}`);
+  if (!data) return null;
+  const current = await getCurrentPromptVersion(ctx.supa, (data as { id: string }).id);
+  const metadata = current?.metadata as { target_model?: string } | null | undefined;
+  return metadata?.target_model ?? null;
 }
 
 /**
@@ -68,7 +98,8 @@ async function load(ctx: StageContext): Promise<StageState> {
 async function ensureSlotPrompt(
   ctx: StageContext,
   slotPlan: DistinctImageSlot,
-  scene: SceneRow
+  scene: SceneRow,
+  reelConfig: ReelConfigRow
 ): Promise<{ promptId: string; versionId: string; text: string; reference_paths: string[] }> {
   const kind = promptKindFor(slotPlan.role);
   const { data, error } = await ctx.supa
@@ -93,28 +124,33 @@ async function ensureSlotPrompt(
   }
 
   const brand = await getBrandContext(ctx.supa, ctx.clientId);
-  const products = await getProductsWithPhotos(ctx.supa, ctx.clientId);
 
   const neighborScene =
     slotPlan.linked_scene_ids.length > 1
       ? await getScene(ctx.supa, slotPlan.linked_scene_ids.find((id) => id !== slotPlan.primary_scene_id)!)
       : null;
 
-  const { prompt, reference_paths } = await ctx.skills.imagePrompt({
-    scene: {
-      description: scene.description,
-      type: scene.type,
-      product_in_scene: scene.product_in_scene,
-      seconds: scene.seconds,
+  const target = targetModelFor(reelConfig.image_provider);
+  const { prompt, reference_paths } = await ctx.skills.imagePrompt(
+    {
+      scene: {
+        description: scene.description,
+        type: scene.type,
+        seconds: scene.seconds,
+      },
+      boundary_context: {
+        role: slotPlan.role,
+        shared: slotPlan.shared,
+        neighborDescription: neighborScene?.description ?? undefined,
+      },
+      brand,
     },
-    boundary_context: {
-      role: slotPlan.role,
-      shared: slotPlan.shared,
-      neighborDescription: neighborScene?.description ?? undefined,
-    },
-    brand,
-    products,
-  });
+    target ?? undefined,
+    // A shared slot is one half of a continuous boundary, which is the case
+    // where the clip model interpolates — so the frame has to hold up as the
+    // start (or end) of a full-length render, not just of the scene's seconds.
+    reelModelContext(reelConfig, { uses_end_frames: slotPlan.shared })
+  );
 
   const { prompt: promptRow, version } = await upsertPromptVersion(ctx.supa, {
     promptId: existing?.id,
@@ -124,6 +160,7 @@ async function ensureSlotPrompt(
     text: prompt,
     reference_paths,
     source: "skill",
+    metadata: target ? { target_model: target.id, target_model_label: target.label } : null,
   });
 
   return { promptId: promptRow.id, versionId: version.id, text: version.text, reference_paths };
@@ -136,7 +173,7 @@ export async function ensureImagePrompts(ctx: StageContext): Promise<void> {
   const plan = planImageSlots(scenes, reelConfig, supportsEndFrameLookupFor(ctx.adapters, reelConfig.veo_variant));
   for (const slotPlan of plan) {
     const scene = scenes.find((s) => s.id === slotPlan.primary_scene_id);
-    if (scene) await ensureSlotPrompt(ctx, slotPlan, scene);
+    if (scene) await ensureSlotPrompt(ctx, slotPlan, scene, reelConfig);
   }
 }
 
@@ -147,9 +184,18 @@ async function generateSlotAsset(
   slotPlan: DistinctImageSlot,
   scene: SceneRow
 ): Promise<AssetRow> {
-  const { promptId, versionId, text, reference_paths } = await ensureSlotPrompt(ctx, slotPlan, scene);
+  const { promptId, versionId, text, reference_paths } = await ensureSlotPrompt(ctx, slotPlan, scene, reelConfig);
+  const productPaths = await productRefPaths(ctx.supa, reelConfig, promptId);
 
-  const { asset } = await generateAndPersistImage(ctx, reelConfig, slotPlan, scene, text, reference_paths, versionId);
+  const { asset } = await generateAndPersistImage(
+    ctx,
+    reelConfig,
+    slotPlan,
+    scene,
+    text,
+    [...reference_paths, ...productPaths],
+    versionId
+  );
 
   // Link the prompt to the asset it produced (lineage — prompts.asset_id).
   await ctx.supa.from("prompts").update({ asset_id: asset.id }).eq("id", promptId);
@@ -229,9 +275,13 @@ async function generateAndPersistImage(
   const adapter = ctx.adapters.get("image", provider);
   const providerKey = await ctx.keys.forProvider(ctx.clientId, provider);
 
+  // referencePaths is "stage-level refs first, then the reel's product refs"
+  // (generateSlotAsset/redoAsset) — slicing to the adapter's cap therefore
+  // drops product defaults before the user's own uploads.
+  const maxRefs = adapter.capabilities().max_reference_images;
   const references = await Promise.all(
-    referencePaths.map(async (path) => {
-      const buffer = await ctx.storage.download("products", path);
+    (maxRefs == null ? referencePaths : referencePaths.slice(0, maxRefs)).map(async (path) => {
+      const buffer = await ctx.storage.download("assets", path);
       return { base64: buffer.toString("base64"), mime_type: guessMimeFromExt(path) };
     })
   );
@@ -357,20 +407,26 @@ export function createImageReviewHooks(ctx: StageContext): ReviewHooks {
       if (!promptRow.scene_id) throw new Error(`prompt ${promptId} has no associated scene`);
       const scene = await getScene(ctx.supa, promptRow.scene_id);
       const brand = await getBrandContext(ctx.supa, ctx.clientId);
-      const products = await getProductsWithPhotos(ctx.supa, ctx.clientId);
       const role: "start" | "end" = promptRow.kind === "image_start" ? "start" : "end";
+      // A redo is also how a stale prompt gets re-optimised: this reads the
+      // reel's CURRENT image model, so re-running after a model switch rewrites
+      // the prompt for whatever is selected now.
+      const reelConfig = await getReelConfig(ctx.supa, promptRow.reel_id);
+      const target = targetModelFor(reelConfig.image_provider);
 
-      const { prompt, reference_paths } = await ctx.skills.imagePrompt({
-        scene: {
-          description: scene.description,
-          type: scene.type,
-          product_in_scene: scene.product_in_scene,
-          seconds: scene.seconds,
+      const { prompt, reference_paths } = await ctx.skills.imagePrompt(
+        {
+          scene: {
+            description: scene.description,
+            type: scene.type,
+            seconds: scene.seconds,
+          },
+          boundary_context: { role, shared: false },
+          brand,
         },
-        boundary_context: { role, shared: false },
-        brand,
-        products,
-      });
+        target ?? undefined,
+        reelModelContext(reelConfig)
+      );
 
       const { version } = await upsertPromptVersion(ctx.supa, {
         promptId,
@@ -381,6 +437,7 @@ export function createImageReviewHooks(ctx: StageContext): ReviewHooks {
         text: prompt,
         reference_paths,
         source: "skill",
+        metadata: target ? { target_model: target.id, target_model_label: target.label } : null,
       });
       return version;
     },
@@ -410,6 +467,7 @@ export function createImageReviewHooks(ctx: StageContext): ReviewHooks {
       if (error) throw new Error(`prompts lookup failed: ${error.message}`);
       const currentPromptVersion = promptRow ? await getCurrentPromptVersion(ctx.supa, (promptRow as { id: string }).id) : null;
       if (!currentPromptVersion) throw new Error(`no current prompt found for asset ${assetId}`);
+      const productPaths = await productRefPaths(ctx.supa, reelConfig, (promptRow as { id: string }).id);
 
       const slotPlan: DistinctImageSlot = {
         key: asset.id,
@@ -426,7 +484,7 @@ export function createImageReviewHooks(ctx: StageContext): ReviewHooks {
         slotPlan,
         scene,
         currentPromptVersion.text,
-        currentPromptVersion.reference_paths ?? [],
+        [...(currentPromptVersion.reference_paths ?? []), ...productPaths],
         currentPromptVersion.id,
         assetId,
         "redo"

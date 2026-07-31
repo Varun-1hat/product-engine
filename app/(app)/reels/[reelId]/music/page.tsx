@@ -23,9 +23,15 @@ interface MusicVersion {
   url: string | null;
 }
 
+interface PromptStaleness {
+  written_for: string;
+  will_run_on: string;
+  message: string;
+}
+
 interface MusicStateResponse {
   stage: "music";
-  data: { reel_config: ReelConfigRow };
+  data: { reel_config: ReelConfigRow; prompt_staleness: PromptStaleness | null };
   music_url: string | null;
   versions: MusicVersion[];
 }
@@ -59,6 +65,10 @@ export default function MusicStagePage({ params }: { params: Promise<{ reelId: s
   const [prompt, setPrompt] = useState("");
   const [provider, setProvider] = useState<MusicProvider>("elevenlabs");
   const [generating, setGenerating] = useState(false);
+  const [drafting, setDrafting] = useState(false);
+  // Session-only: "leave as is" writes nothing, so the mismatch re-surfaces on
+  // reload until the prompt or the selected model actually changes.
+  const [stalenessDismissed, setStalenessDismissed] = useState(false);
 
   function clamp(n: number): number {
     if (!Number.isFinite(n)) return 0;
@@ -126,6 +136,32 @@ export default function MusicStagePage({ params }: { params: Promise<{ reelId: s
       await reload();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /**
+   * Drafts the prompt with the music-prompt skill, written for the selected
+   * model. `force` is the "re-optimise" action after a provider switch; without
+   * it an existing prompt is left alone. Costs orchestrator tokens only — no
+   * music is generated here.
+   */
+  async function handleDraftPrompt(force: boolean) {
+    setDrafting(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/reels/${reelId}/music/prompt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error ?? "draft failed");
+      setStalenessDismissed(false);
+      await reload();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDrafting(false);
     }
   }
 
@@ -198,6 +234,20 @@ export default function MusicStagePage({ params }: { params: Promise<{ reelId: s
           <CardTitle>Music</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
+          {state.data.prompt_staleness && !stalenessDismissed ? (
+            <div className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+              <span className="text-xs">{state.data.prompt_staleness.message}</span>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => handleDraftPrompt(true)} disabled={drafting || generating}>
+                  {drafting ? "Re-optimising…" : `Re-optimise for ${state.data.prompt_staleness.will_run_on}`}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setStalenessDismissed(true)} disabled={drafting}>
+                  Leave as is
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
           <div className="flex flex-col gap-1">
             <Label htmlFor="music_prompt">Prompt</Label>
             <Textarea
@@ -222,7 +272,10 @@ export default function MusicStagePage({ params }: { params: Promise<{ reelId: s
                 </SelectContent>
               </Select>
             </div>
-            <Button variant="outline" onClick={handleSavePrompt} disabled={generating}>
+            <Button variant="outline" onClick={() => handleDraftPrompt(Boolean(prompt.trim()))} disabled={drafting || generating}>
+              {drafting ? "Writing…" : prompt.trim() ? "Rewrite with AI" : "Write with AI"}
+            </Button>
+            <Button variant="outline" onClick={handleSavePrompt} disabled={generating || drafting}>
               Save prompt
             </Button>
             <Button onClick={handleGenerate} disabled={generating || !prompt.trim()}>

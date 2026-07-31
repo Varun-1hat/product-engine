@@ -1,7 +1,7 @@
 /**
- * worker/reconcile.ts had ZERO test coverage before this pass (V2 Phase 0 —
+ * src/lib/jobs/reconcile.ts had ZERO test coverage before this pass (V2 Phase 0 —
  * .pipeline/spec.md item 3 / N1 explicitly flags this as the Tester's top
- * priority, since worker/** had no tests at all). Exercises reconcileJob()
+ * priority, since src/lib/jobs/** had no tests at all). Exercises reconcileJob()
  * end-to-end against a fake Supabase client (src/testUtils/fakeSupabase.ts)
  * + the REAL job queue (src/lib/jobs/queue.ts, including the new
  * retryLater()) + the REAL cost engine (src/lib/cost/engine.ts) — only the
@@ -11,9 +11,9 @@
  *
  * Core focus (N1): a caught poll() error must re-arm the job via
  * jobs.retryLater() rather than route through jobs.fail()'s default retry
- * (which moves a retryable job to 'queued' — a status worker/index.ts's main
- * claim loop treats as fatal for broll_gen/avatar_gen/outro_gen, since those
- * job types never pass through it), and must NOT log a cost_log row under
+ * (which moves a retryable job to 'queued' — a status nothing picks up,
+ * since broll_gen/avatar_gen/outro_gen never pass through the inline
+ * dispatcher), and must NOT log a cost_log row under
  * the generation's real idempotency_key until the job is genuinely terminal
  * (attempts >= max_attempts).
  */

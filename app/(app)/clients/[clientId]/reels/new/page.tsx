@@ -15,6 +15,10 @@ import { ProgressSteps, type ProgressStep } from "@/app/components/ui/progress-s
 import { useApiResource } from "@/app/hooks/useApiResource";
 import { routes } from "@/src/lib/routes";
 import { VEO_VARIANT_LABELS, allowedAspectRatios, allowedResolutions } from "@/src/lib/brollModels";
+import {
+  DEFAULT_ORCHESTRATOR_MODEL,
+  ORCHESTRATOR_MODEL_LABELS,
+} from "@/src/lib/orchestratorModels";
 import { STAGE_ORDER } from "@/src/stages/types";
 import type { ValidationResult } from "@/src/adapters/types";
 
@@ -55,6 +59,7 @@ export default function NewReelPage({ params }: { params: Promise<{ clientId: st
   const [avatarLookId, setAvatarLookId] = useState<string | undefined>(undefined);
   const [includeBroll, setIncludeBroll] = useState(true);
   const [veoVariant, setVeoVariant] = useState("fast");
+  const [orchestratorModel, setOrchestratorModel] = useState<string>(DEFAULT_ORCHESTRATOR_MODEL);
   const [aspectRatio, setAspectRatio] = useState("9:16");
   const [resolution, setResolution] = useState("1080p");
   const [busy, setBusy] = useState(false);
@@ -100,6 +105,7 @@ export default function NewReelPage({ params }: { params: Promise<{ clientId: st
           broll_provider: brollProvider,
           image_provider: "nano_banana",
           veo_variant: veoVariant,
+          orchestrator_model: orchestratorModel,
           aspect_ratio: aspectRatio,
           resolution,
         }),
@@ -238,6 +244,25 @@ export default function NewReelPage({ params }: { params: Promise<{ clientId: st
                 </Select>
               </div>
             ) : null}
+
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="orchestrator_model">Orchestrating LLM</Label>
+              <Select value={orchestratorModel} onValueChange={setOrchestratorModel}>
+                <SelectTrigger id="orchestrator_model">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(ORCHESTRATOR_MODEL_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <span className="text-xs text-muted-foreground">
+                Writes this reel&apos;s scenes and prompts. Applies to the whole reel.
+              </span>
+            </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col gap-1">

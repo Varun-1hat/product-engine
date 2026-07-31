@@ -19,6 +19,7 @@ import type { ServiceClient } from "@/src/lib/supabase/service";
 import type { AdapterRegistry } from "@/src/adapters/registry";
 import type { ValidationResult } from "@/src/adapters/types";
 import { ASPECT_RATIOS, PROVIDERS, RESOLUTIONS, VEO_VARIANTS } from "@/src/lib/db/enums";
+import { DEFAULT_ORCHESTRATOR_MODEL, ORCHESTRATOR_MODELS } from "@/src/lib/orchestratorModels";
 import type { Reel, ReelConfigRow } from "@/src/lib/db/types";
 
 export interface ReelSetupStageContext {
@@ -43,6 +44,10 @@ export const reelSetupInputSchema = z.object({
   aspect_ratio: z.enum(ASPECT_RATIOS),
   resolution: z.enum(RESOLUTIONS),
   output_fps: z.number().int().positive().default(30),
+  /** The orchestrating LLM used by every runtime skill for this reel's whole lifetime. */
+  orchestrator_model: z.enum(ORCHESTRATOR_MODELS).default(DEFAULT_ORCHESTRATOR_MODEL),
+  /** Product reference photos, auto-attached to this reel's gen-AI calls (src/lib/productRefs.ts). */
+  product_reference_paths: z.array(z.string()).default([]),
 });
 export type ReelSetupInput = z.infer<typeof reelSetupInputSchema>;
 
@@ -186,6 +191,8 @@ export async function processReelSetup(
         aspect_ratio: input.aspect_ratio,
         resolution: input.resolution,
         output_fps: input.output_fps,
+        orchestrator_model: input.orchestrator_model,
+        product_reference_paths: input.product_reference_paths,
       },
       { onConflict: "reel_id" }
     )

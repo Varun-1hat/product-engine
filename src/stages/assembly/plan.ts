@@ -1,6 +1,6 @@
 /**
  * Stage 9 assembly-plan construction (spec §7 Stage 9) — pure, no I/O, no
- * ffmpeg. worker/assembly.ts turns this plan into actual ffmpeg commands;
+ * ffmpeg. src/lib/jobs/assembly.ts turns this plan into actual ffmpeg commands;
  * everything about WHICH clips, in WHAT order, which seams get the 1-frame
  * trim, and the music timing math lives here so it's independently
  * unit-testable without ffmpeg or real media files.
@@ -8,17 +8,17 @@
  * Steps encoded (§7 Stage 9 / §8 / §10.9-10.11 / §10.20):
  *  1. Ordered clip list = scenes by position (their clip_asset_id current
  *     version) + the outro clip appended last.
- *  2. (worker) strip audio + normalize every clip to reel resolution/
+ *  2. (inline) strip audio + normalize every clip to reel resolution/
  *     aspect_ratio/output_fps/yuv420p/H.264 — Veo emits native audio, all
  *     clips end up silent.
  *  3. Continuous-seam 1-frame trim: for each adjacent pair whose
  *     *effective* boundary is 'continuous', drop 1 frame from the head of
  *     the INCOMING clip. Hard-cut boundaries: no trim. The outro's
  *     incoming boundary is never a shared-frame seam.
- *  4. (worker) concat the normalized clips.
+ *  4. (inline) concat the normalized clips.
  *  5. Music bed: trim/loop the track to the total reel duration + fade
  *     in/out, single audio track.
- *  6. (worker) mux to mp4 (H.264 + AAC) -> renders/ -> a new final_render
+ *  6. (inline) mux to mp4 (H.264 + AAC) -> renders/ -> a new final_render
  *     asset_version.
  */
 import { effectiveBoundary, type ReelConfigLike, type SceneLike, type SupportsEndFrameLookup } from "@/src/lib/routing";
