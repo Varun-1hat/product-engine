@@ -1,0 +1,14 @@
+-- Stage 8 music gains a prompt-generation skill (src/skills/music-prompt.ts),
+-- so the music prompt is now model-optimised like the image/clip prompts are.
+--
+-- Records WHICH music model the stored music_prompt was written for. The
+-- image/clip/outro prompts carry the same fact in prompt_versions.metadata, but
+-- the music prompt lives directly on reel_config (one slot per reel, no version
+-- table), so it needs its own column. Null = written before this existed, or
+-- typed by hand — no staleness claim is made either way.
+--
+-- The review UI compares this against reel_config.music_provider and, when they
+-- diverge, offers to re-run the skill for the currently-selected model. It is
+-- only ever a warning: an ElevenLabs-shaped prompt still generates on Lyria,
+-- just less well (Lyria wants terse descriptors and ignores BPM text).
+alter table reel_config add column if not exists music_prompt_target_model text null;

@@ -1,0 +1,48 @@
+# Supabase local development config. If `supabase start` reports unknown
+# keys, your installed CLI version's schema has moved on — run
+# `supabase init` in a scratch dir and diff, or see
+# https://supabase.com/docs/guides/local-development/cli/config
+project_id = "product-video-pipeline"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000"]
+jwt_expiry = 3600
+# Single internal agency workspace (Assumption 7): staff are provisioned by
+# an admin (Studio / `auth.admin.inviteUserByEmail`) and sign in via emailed
+# magic link — no client-facing signup surface is built in app/.
+enable_signup = true
+
+[auth.email]
+enable_confirmations = false
+
+[realtime]
+enabled = true
+
+[edge_runtime]
+enabled = false
