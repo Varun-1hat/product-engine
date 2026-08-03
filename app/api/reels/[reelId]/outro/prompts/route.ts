@@ -17,3 +17,13 @@ export async function POST(_req: NextRequest, { params }: { params: Promise<{ re
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 400 });
   }
 }
+
+/*
+ * No PATCH ("use reel product references") counterpart to ../../clip/prompts
+ * here, deliberately: the outro clip can't take reference images. Every model
+ * resolveOutroRoute can pick declares accepted_inputs of prompt + start_image
+ * + end_image and max_reference_images 2 (src/adapters/video_broll/
+ * veoCapabilities.ts, higgsfield.ts) — a budget the last scene's end frame and
+ * the branded end card consume in full. src/lib/jobs/outro.ts's runModelRoute
+ * therefore reads only the prompt text. A toggle here would be inert.
+ */

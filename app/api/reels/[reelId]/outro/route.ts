@@ -18,6 +18,7 @@ import { outroStage } from "@/src/stages/outro";
 import { reconcilePendingJobs } from "@/src/lib/jobs/run";
 import { assetHistory, getAsset, getCurrentPromptVersion, promptHistory } from "@/src/lib/versioning";
 import type { StageContext } from "@/src/stages/types";
+import type { PromptStaleness } from "@/src/skills/model-prompt/guidance";
 import type { ReelConfigRow } from "@/src/lib/db/types";
 
 interface VersionSummary {
@@ -33,7 +34,33 @@ interface SlotDetail {
   current_version_no: number;
   preview_url: string | null;
   history: VersionSummary[];
-  prompt: { id: string; text: string; version_no: number; history: VersionSummary[] } | null;
+  prompt: {
+    id: string;
+    text: string;
+    version_no: number;
+    history: VersionSummary[];
+    /** Stage-level reference images attached to the outro motion prompt. */
+    reference_paths: string[];
+    /** Per-prompt opt-out of the reel's product reference photos. */
+    use_product_refs: boolean;
+  } | null;
+}
+
+type PromptDetail = NonNullable<SlotDetail["prompt"]>;
+
+/** Same projection app/api/reels/[reelId]/clip/route.ts builds, so PromptReview gets identical props on both pages. */
+async function buildPromptDetail(ctx: StageContext, promptId: string): Promise<PromptDetail | null> {
+  const [current, history] = await Promise.all([getCurrentPromptVersion(ctx.supa, promptId), promptHistory(ctx.supa, promptId)]);
+  if (!current) return null;
+  const { data: row } = await ctx.supa.from("prompts").select("use_product_refs").eq("id", promptId).maybeSingle();
+  return {
+    id: promptId,
+    text: current.text,
+    version_no: current.version_no,
+    history: history.map((h) => ({ id: h.id, version_no: h.version_no, created_at: h.created_at })),
+    reference_paths: current.reference_paths ?? [],
+    use_product_refs: (row as { use_product_refs: boolean } | null)?.use_product_refs ?? true,
+  };
 }
 
 async function buildSlotDetail(ctx: StageContext, assetId: string): Promise<SlotDetail> {
@@ -47,19 +74,7 @@ async function buildSlotDetail(ctx: StageContext, assetId: string): Promise<Slot
   }
 
   const { data: promptRow } = await ctx.supa.from("prompts").select("id").eq("asset_id", assetId).maybeSingle();
-  let prompt: SlotDetail["prompt"] = null;
-  if (promptRow) {
-    const promptId = (promptRow as { id: string }).id;
-    const [current, history] = await Promise.all([getCurrentPromptVersion(ctx.supa, promptId), promptHistory(ctx.supa, promptId)]);
-    if (current) {
-      prompt = {
-        id: promptId,
-        text: current.text,
-        version_no: current.version_no,
-        history: history.map((h) => ({ id: h.id, version_no: h.version_no, created_at: h.created_at })),
-      };
-    }
-  }
+  const prompt = promptRow ? await buildPromptDetail(ctx, (promptRow as { id: string }).id) : null;
 
   return {
     asset_id: asset.id,
@@ -103,27 +118,25 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ ree
 
   // Outro motion prompt, looked up by (reel, kind) rather than via the clip
   // asset, so it's available for editing BEFORE the clip is generated.
-  let outroPrompt: SlotDetail["prompt"] = null;
   const { data: outroPromptRow } = await ctx.supa
     .from("prompts")
     .select("id")
     .eq("reel_id", reelId)
     .eq("kind", "outro_motion")
     .maybeSingle();
-  if (outroPromptRow) {
-    const promptId = (outroPromptRow as { id: string }).id;
-    const [current, history] = await Promise.all([getCurrentPromptVersion(ctx.supa, promptId), promptHistory(ctx.supa, promptId)]);
-    if (current) {
-      outroPrompt = {
-        id: promptId,
-        text: current.text,
-        version_no: current.version_no,
-        history: history.map((h) => ({ id: h.id, version_no: h.version_no, created_at: h.created_at })),
-      };
-    }
-  }
+  const outroPrompt = outroPromptRow ? await buildPromptDetail(ctx, (outroPromptRow as { id: string }).id) : null;
 
-  return NextResponse.json({ stage: "outro", data: { reel_config: reelConfig }, slots, prompt: outroPrompt });
+  // Passed straight through from outroStage.load() — the prompt may have been
+  // written for a model the reel has since switched away from, which the page
+  // surfaces as PromptReview's advisory "re-optimise" notice.
+  const promptStaleness = (state.data as { prompt_staleness: PromptStaleness | null }).prompt_staleness;
+
+  return NextResponse.json({
+    stage: "outro",
+    data: { reel_config: reelConfig, prompt_staleness: promptStaleness },
+    slots,
+    prompt: outroPrompt,
+  });
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ reelId: string }> }) {
